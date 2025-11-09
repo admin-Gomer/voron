@@ -11,7 +11,7 @@ bot_username = "M_FileBot"    # Имя вашего бота (без @)
 
 # Укажите свой user_id и ник
 ADMIN_USER_ID = 1129009422  # Замените на ваш user_id
-SIGNATURE = "@M_FileBot"  # Замените на ваш ник или имя
+SIGNATURE = "@ANDRO_FILE"  # Замените на ваш ник или имя
 
 app = Client(
     "file_bot",
@@ -152,7 +152,9 @@ def send_file(client, message):
         else:
             message.reply("Файл не найден.")
     else:
-        message.reply("Привет! Пришли мне .apk файл, и я дам тебе ссылку.")
+        # Получаем имя пользователя
+        username = message.from_user.username if message.from_user.username else message.from_user.first_name
+        message.reply(f"Привет, {username}! Ну что, продолжим?")
 
-print("Бот запущен!")
+print("БОТ ЗАПУЩЕН!")
 app.run()
