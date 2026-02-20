@@ -1,29 +1,45 @@
 import os
 import json
 from uuid import uuid4
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+import random
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
     ConversationHandler, CallbackQueryHandler, ContextTypes
 )
+import asyncio
+import shutil
 
 # ======= НАСТРОЙКИ =======
-TELEGRAM_TOKEN = "5807314796:AAGjTJMoU6_gSJok"
+TELEGRAM_TOKEN = "8578375390:AAEV0xto8D_QB6uxVtuNsUrx8Pjhk9Qv0"
 ADMIN_ID = 1129009422         # Ваш user id (число)
-CHANNEL_ID = -1003405549440 # id канала/чата для публикации постов
+CHANNEL_ID = -1002329753497 # id канала/чата для публикации постов
+CHANNEL_USERNAME = "@ANDRO_FILE"
+CHANNEL_LINK = "https://t.me/ANDRO_FILE"
 FILE_DB = "file_db.json"
 SIGNATURE = "@ANDRO_FILE"
 MEDIA_DIR = "admin_media"
+WATERMARK_DIR = "watermarks"
+
+# Пути к аватаркам и шрифтам
+CUSTOM_AVATAR = os.path.join(WATERMARK_DIR, "custom_avatar.png")
+DEFAULT_AVATAR = os.path.join(WATERMARK_DIR, "default_avatar.png")
+FONT_DIR = "fonts"
+os.makedirs(FONT_DIR, exist_ok=True)
+
 os.makedirs(MEDIA_DIR, exist_ok=True)
+os.makedirs(WATERMARK_DIR, exist_ok=True)
 # =========================
 
 # ------ Состояния админки ------
-ADD_MEDIA, ADD_TITLE, ADD_DESC, ADD_BTN_LABEL, ADD_BTN_URL, ADMIN_PANEL, BTN_EDIT_LABEL, BTN_EDIT_URL = range(8)
+(ADD_MEDIA, ADD_DESC, ADD_BTN_LABEL, ADD_BTN_URL, 
+ ADMIN_PANEL, BTN_EDIT_LABEL, ADD_WATERMARK, 
+ EDIT_TITLE, EDIT_DESC, EDIT_BUTTONS) = range(10)
 
 # ------ БЛОК FILEBOT ------
 def load_db():
-    """Загружает базу данных файлов"""
     if not os.path.exists(FILE_DB):
         with open(FILE_DB, "w", encoding="utf-8") as f:
             json.dump({"files": {}, "last_id": 0}, f)
@@ -35,7 +51,7 @@ def load_db():
             if "files" not in data:
                 old_files = data
                 max_id = 0
-                for key in old_files.keys():
+                for key, value in old_files.items():
                     if key.isdigit() and int(key) > max_id:
                         max_id = int(key)
                 data = {"files": old_files, "last_id": max_id}
@@ -47,12 +63,88 @@ def load_db():
         return {"files": {}, "last_id": 0}
 
 def save_db(db):
-    """Сохраняет базу данных файлов"""
     with open(FILE_DB, "w", encoding="utf-8") as f:
         json.dump(db, f, indent=2, ensure_ascii=False)
 
+# ========== КОМАНДЫ ==========
+async def del_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /del для удаления файла"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Этот бот приватный.")
+        return
+    
+    args = context.args
+    if len(args) != 1 or not args[0].isdigit():
+        await update.message.reply_text(
+            "❌ Используйте: /del ID\n"
+            "Например: /del 5"
+        )
+        return
+    
+    file_id = args[0]
+    db = load_db()
+    
+    if file_id not in db["files"]:
+        await update.message.reply_text("❌ Файл с таким ID не найден.")
+        return
+    
+    file_name = db["files"][file_id]["file_name"]
+    del db["files"][file_id]
+    
+    # Обновляем last_id
+    if db["files"]:
+        db["last_id"] = max(int(id) for id in db["files"].keys())
+    else:
+        db["last_id"] = 0
+    
+    save_db(db)
+    
+    await update.message.reply_text(f"✅ Файл ID {file_id} ({file_name}) удалён.")
+
+async def clear_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /clear для удаления всех файлов"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Этот бот приватный.")
+        return
+    
+    # Запрашиваем подтверждение
+    keyboard = [[
+        InlineKeyboardButton("✅ Да, очистить всё", callback_data='clear_confirm'),
+        InlineKeyboardButton("❌ Нет, отмена", callback_data='clear_cancel')
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+        "Вы уверены, что хотите удалить ВСЕ файлы?\n"
+        "Это действие нельзя отменить!",
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup
+    )
+
+async def clear_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик подтверждения очистки"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == 'clear_confirm':
+        db = load_db()
+        
+        # Создаем резервную копию
+        if db["files"]:
+            backup_file = f"file_db_backup_{len(db['files'])}_files.json"
+            shutil.copy2(FILE_DB, backup_file)
+        
+        # Очищаем базу
+        new_db = {"files": {}, "last_id": 0}
+        save_db(new_db)
+        
+        await query.edit_message_text(f"✅ Все файлы удалены.")
+    else:
+        await query.edit_message_text("❌ Очистка отменена.")
+
 async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка APK файлов - ТОЛЬКО ДЛЯ АДМИНА"""
+    """Автоматически сохраняет APK файлы"""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Этот бот приватный.")
         return
@@ -68,7 +160,6 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db["files"][file_id] = {
                 "file_id": message.document.file_id,
                 "file_name": message.document.file_name,
-                "downloads": 0,
                 "uploaded_at": message.date.isoformat() if message.date else ""
             }
             
@@ -78,324 +169,138 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_username = (await context.bot.get_me()).username
             botlink = f"https://t.me/{bot_username}?start={file_id}"
             
+            # Предлагаем создать пост
+            keyboard = [[InlineKeyboardButton("📝 Создать пост", callback_data=f"create_post_{file_id}")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             markup = (
                 f"✅ Файл сохранен!\n\n"
                 f"📂 ID файла: {file_id}\n"
                 f"📂 Имя файла: {message.document.file_name}\n"
                 f"📦 Размер: {message.document.file_size // 1024 if message.document.file_size else 0} KB\n\n"
                 f"🔗 Ссылка для скачивания:\n"
-                f"<code>{botlink}</code>\n\n"
-                f"📋 Быстрая команда:\n"
-                f"/info {file_id}"
+                f"<code>{botlink}</code>"
             )
             
-            await message.reply_text(markup, parse_mode=ParseMode.HTML)
+            await message.reply_text(markup, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
         except Exception as e:
             await message.reply_text(f"Ошибка: {e}")
     else:
         await message.reply_text("Это не .apk файл. Пришли .apk документ!")
 
-async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Список файлов - ТОЛЬКО ДЛЯ АДМИНА"""
+async def adm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /post - показывает последний файл"""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Этот бот приватный.")
-        return
-    
-    db = load_db()
-    files = db["files"]
-    
-    if files:
-        response = "📋 <b>Список загруженных файлов:</b>\n\n"
-        for key, value in sorted(files.items(), key=lambda x: int(x[0])):
-            downloads = value.get('downloads', 0)
-            response += f"📁 <b>ID {key}:</b> {value['file_name']}\n"
-            response += f"⬇️ Скачиваний: {downloads}\n\n"
-        await update.message.reply_text(response, parse_mode=ParseMode.HTML)
-    else:
-        await update.message.reply_text("Нет загруженных файлов.")
-
-async def file_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Информация о файле - ТОЛЬКО ДЛЯ АДМИНА"""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Этот бот приватный.")
-        return
-    
-    args = context.args
-    if len(args) == 1 and args[0].isdigit():
-        db = load_db()
-        file_key = args[0]
-        entry = db["files"].get(file_key)
-        if entry:
-            downloads = entry.get('downloads', 0)
-            uploaded_at = entry.get('uploaded_at', 'Неизвестно')[:10]
-            
-            bot_username = (await context.bot.get_me()).username
-            botlink = f"https://t.me/{bot_username}?start={file_key}"
-            
-            response = (
-                f"📊 <b>Информация о файле ID {file_key}:</b>\n\n"
-                f"📂 Имя файла: {entry['file_name']}\n"
-                f"⬇️ Скачиваний: {downloads}\n"
-                f"📅 Загружен: {uploaded_at}\n\n"
-                f"🔗 Ссылка для скачивания:\n"
-                f"<code>{botlink}</code>"
-            )
-            await update.message.reply_text(response, parse_mode=ParseMode.HTML)
-        else:
-            await update.message.reply_text("Файл не найден.")
-    else:
-        await update.message.reply_text("Используйте: /info ID")
-
-async def clear_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Очистка файлов - ТОЛЬКО ДЛЯ АДМИНА"""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Этот бот приватный.")
-        return
-    
-    db = load_db()
-    if db["files"]:
-        new_db = {"files": {}, "last_id": 0}
-        save_db(new_db)
-        await update.message.reply_text("✅ Все файлы были успешно удалены.")
-    else:
-        await update.message.reply_text("База данных уже пуста.")
-
-async def del_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удаление файла - ТОЛЬКО ДЛЯ АДМИНА"""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Этот бот приватный.")
-        return
-    
-    args = context.args
-    if len(args) == 1 and args[0].isdigit():
-        db = load_db()
-        file_key = args[0]
-        if file_key in db["files"]:
-            fname = db["files"][file_key]["file_name"]
-            downloads = db["files"][file_key].get('downloads', 0)
-            del db["files"][file_key]
-            save_db(db)
-            await update.message.reply_text(f"✅ Файл ID {file_key} ({fname}) удалён.\n📊 Было скачиваний: {downloads}")
-        else:
-            await update.message.reply_text("Файл с таким ID не найден.")
-    else:
-        await update.message.reply_text("Используйте: /del ID")
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Статистика - ТОЛЬКО ДЛЯ АДМИНА"""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Этот бот приватный.")
-        return
+        return ConversationHandler.END
     
     db = load_db()
     files = db["files"]
     
     if not files:
-        await update.message.reply_text("📭 Нет загруженных файлов.")
-        return
-    
-    total_files = len(files)
-    total_downloads = sum(file_data.get('downloads', 0) for file_data in files.values())
-    
-    sorted_files = sorted(files.items(), key=lambda x: x[1].get('downloads', 0), reverse=True)[:10]
-    
-    response = "📊 <b>Статистика скачиваний</b>\n\n"
-    response += f"📁 Всего файлов: <b>{total_files}</b>\n"
-    response += f"⬇️ Всего скачиваний: <b>{total_downloads}</b>\n"
-    response += f"🔢 Последний ID: <b>{db['last_id']}</b>\n"
-    
-    if total_files > 0:
-        avg_downloads = total_downloads / total_files
-        response += f"📈 Среднее скачиваний на файл: <b>{avg_downloads:.1f}</b>\n\n"
-    
-    response += "🏆 <b>Топ-10 самых скачиваемых файлов:</b>\n\n"
-    
-    for i, (file_id, file_data) in enumerate(sorted_files, 1):
-        downloads = file_data.get('downloads', 0)
-        filename = file_data['file_name']
-        if len(filename) > 30:
-            filename = filename[:27] + "..."
-        
-        response += f"{i}. <b>ID {file_id}:</b> {filename}\n"
-        response += f"   ⬇️ <b>{downloads}</b> скачиваний\n\n"
-    
-    recent_files = list(files.items())[-5:]
-    if len(recent_files) > 0:
-        response += "🆕 <b>Последние добавленные файлы:</b>\n\n"
-        for file_id, file_data in recent_files[-5:]:
-            downloads = file_data.get('downloads', 0)
-            filename = file_data['file_name']
-            if len(filename) > 25:
-                filename = filename[:22] + "..."
-            response += f"• ID {file_id}: {filename} (⬇️ {downloads})\n"
-    
-    await update.message.reply_text(response, parse_mode=ParseMode.HTML)
-
-async def filebot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start - ПРЯМАЯ ВЫДАЧА ФАЙЛА БЕЗ ПРИВЕТСТВИЯ"""
-    args = context.args
-    if len(args) == 1 and args[0].isdigit():
-        db = load_db()
-        file_key = args[0]
-        entry = db["files"].get(file_key)
-        if entry and "file_id" in entry:
-            entry['downloads'] = entry.get('downloads', 0) + 1
-            save_db(db)
-            
-            caption = f"{SIGNATURE}"
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=entry["file_id"],
-                caption=caption
-            )
-        else:
-            await update.message.reply_text("Файл не найден.")
-    else:
-        # Если команда /start без аргументов - ТОЛЬКО ДЛЯ АДМИНА
-        if update.effective_user.id != ADMIN_ID:
-            await update.message.reply_text("⛔ Этот бот приватный.")
-            return
-        
-        # Для админа показываем минимальную информацию
-        user = update.effective_user
-        username = user.username if user.username else user.first_name
-        
-        db = load_db()
-        files = db["files"]
-        
-        if files:
-            response = f"👋 Привет, {username}!\n"
-            response += f"📊 Файлов в базе: {len(files)}\n"
-            response += f"🔢 Последний ID: {db['last_id']}\n\n"
-            response += "📋 <b>Команды:</b>\n"
-            response += "/list - список файлов\n"
-            response += "/stats - статистика\n"
-            response += "/post - создать пост\n"
-            response += "/info ID - информация о файле"
-        else:
-            response = (
-                f"Привет, {username}!\n"
-                "📁 Нет загруженных файлов.\n"
-                "📎 Отправьте APK файл чтобы сохранить его."
-            )
-        
-        await update.message.reply_text(response, parse_mode=ParseMode.HTML)
-
-# ------- БЛОК АДМИНКИ (ОСТАЕТСЯ ТОЛЬКО ДЛЯ АДМИНА) -------
-def render_post(post):
-    text = ""
-    if post.get('title'):
-        text += f"<b>{post['title']}</b>\n"
-        text += f"<b>____________________________________</b>\n"
-    
-    if post.get('description'):
-        text += f"📝 <b>Описание:</b>\n"
-        text += f"{post['description']}\n"
-    
-    text += f"<b>===========================</b>"
-    return text
-
-def build_buttons(post):
-    buttons = post.get("buttons", [])
-    if not buttons:
-        return None
-    rows = []
-    for i in range(0, len(buttons), 2):
-        row = []
-        btn_a = buttons[i]
-        row.append(InlineKeyboardButton(btn_a["label"], url=btn_a["url"]))
-        if i + 1 < len(buttons):
-            btn_b = buttons[i + 1]
-            row.append(InlineKeyboardButton(btn_b["label"], url=btn_b["url"]))
-        rows.append(row)
-    return InlineKeyboardMarkup(rows)
-
-def admin_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📷 Фото/Видео/GIF", callback_data='set_media')],
-        [InlineKeyboardButton("✏️ Заголовок", callback_data='set_title'),
-         InlineKeyboardButton("📄 Описание", callback_data='set_desc')],
-        [InlineKeyboardButton("🔘 Кнопки", callback_data='manage_buttons')],
-        [InlineKeyboardButton("📤 Опубликовать", callback_data='publish'),
-         InlineKeyboardButton("👁 Предпросмотр", callback_data='preview')],
-        [InlineKeyboardButton("📊 Статистика", callback_data='stats_admin'),
-         InlineKeyboardButton("❌ Отмена", callback_data='cancel')]
-    ])
-
-def media_type_keyboard():
-    """Клавиатура для выбора типа медиа"""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📷 Фото", callback_data='media_photo'),
-         InlineKeyboardButton("🎬 Видео", callback_data='media_video'),
-         InlineKeyboardButton("🎞 GIF", callback_data='media_gif')],
-        [InlineKeyboardButton("⏭ Пропустить", callback_data='media_skip'),
-         InlineKeyboardButton("❌ Без медиа", callback_data='media_none')]
-    ])
-
-def btn_manage_kb(post):
-    kb = [[InlineKeyboardButton(f"✏ {i + 1}: {btn['label']}", callback_data=f'editbtn_{i}')]
-          for i, btn in enumerate(post.get('buttons', []))]
-    kb.append([InlineKeyboardButton("➕ Добавить", callback_data='add_btn')])
-    kb.append([InlineKeyboardButton("← Назад", callback_data='back')])
-    return InlineKeyboardMarkup(kb)
-
-def edit_btn_kb(idx):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("↩ Название", callback_data=f'editbtn_label_{idx}')],
-        [InlineKeyboardButton("🌐 URL", callback_data=f'editbtn_url_{idx}')],
-        [InlineKeyboardButton("❌ Удалить", callback_data=f'delbtn_{idx}')],
-        [InlineKeyboardButton("← Назад", callback_data='manage_buttons')]
-    ])
-
-async def adm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Создание поста - ТОЛЬКО ДЛЯ АДМИНА"""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещён.")
+        await update.message.reply_text("📭 Нет файлов. Сначала отправьте .apk файл.")
         return ConversationHandler.END
+    
+    # Получаем последний файл
+    last_file_id = str(db["last_id"])
+    last_file = files[last_file_id]
+    
+    bot_username = (await context.bot.get_me()).username
+    botlink = f"https://t.me/{bot_username}?start={last_file_id}"
+    
+    # Кнопка для создания поста
+    keyboard = [[InlineKeyboardButton(
+        f"📝 Создать пост", 
+        callback_data=f"create_post_{last_file_id}"
+    )]]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"📱 <b>Последний файл:</b>\n\n"
+        f"ID: {last_file_id}\n"
+        f"Имя: {last_file['file_name']}\n\n"
+        f"🔗 Ссылка для скачивания:\n"
+        f"<code>{botlink}</code>\n\n"
+        f"👇 Нажмите кнопку ниже для создания поста",
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup
+    )
+    return ADD_MEDIA
+
+async def start_create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинает создание поста"""
+    query = update.callback_query
+    await query.answer()
+    
+    file_id = query.data.replace("create_post_", "")
+    db = load_db()
+    
+    if file_id not in db["files"]:
+        await query.edit_message_text("❌ Файл не найден.")
+        return ConversationHandler.END
+    
+    # Получаем ссылку на файл
+    bot_username = (await context.bot.get_me()).username
+    botlink = f"https://t.me/{bot_username}?start={file_id}"
     
     context.user_data['post'] = {
         "media_type": None,
         "media_path": "",
         "media_id": "",
-        "title": "",
+        "title": db["files"][file_id]["file_name"],
         "description": "",
-        "buttons": []
+        "buttons": [],
+        "watermark": "avatar",
+        "file_id": file_id
     }
     
-    await update.message.reply_text(
-        "🖼 <b>Создание нового поста</b>\n\n"
-        "Выберите тип медиа для поста или пропустите:",
+    await query.edit_message_text(
+        f"🖼 <b>Создание нового поста</b>\n\n"
+        f"📱 <b>Файл:</b> {db['files'][file_id]['file_name']}\n"
+        f"🔗 <b>Ссылка:</b>\n"
+        f"<code>{botlink}</code>\n\n"
+        f"Выберите тип медиа для поста:",
         parse_mode=ParseMode.HTML,
         reply_markup=media_type_keyboard()
     )
     return ADD_MEDIA
 
 async def add_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    if query:
+    if update.callback_query:
+        query = update.callback_query
         await query.answer()
+        
+        file_id = context.user_data['post']['file_id']
+        bot_username = (await context.bot.get_me()).username
+        botlink = f"https://t.me/{bot_username}?start={file_id}"
         
         if query.data == 'media_photo':
             await query.edit_message_text(
-                "📷 <b>Отправьте фото</b>\n\n"
-                "Отправьте фото для поста или /skip чтобы пропустить:",
+                f"📷 <b>Отправьте фото</b>\n\n"
+                f"🔗 <b>Ссылка на файл:</b>\n"
+                f"<code>{botlink}</code>\n\n"
+                f"Отправьте фото для поста:",
                 parse_mode=ParseMode.HTML
             )
             return ADD_MEDIA
             
         elif query.data == 'media_video':
             await query.edit_message_text(
-                "🎬 <b>Отправьте видео</b>\n\n"
-                "Отправьте видео для поста или /skip чтобы пропустить:",
+                f"🎬 <b>Отправьте видео</b>\n\n"
+                f"🔗 <b>Ссылка на файл:</b>\n"
+                f"<code>{botlink}</code>\n\n"
+                f"Отправьте видео для поста:",
                 parse_mode=ParseMode.HTML
             )
             return ADD_MEDIA
             
         elif query.data == 'media_gif':
             await query.edit_message_text(
-                "🎞 <b>Отправьте GIF</b>\n\n"
-                "Отправьте GIF для поста или /skip чтобы пропустить:",
+                f"🎞 <b>Отправьте GIF</b>\n\n"
+                f"🔗 <b>Ссылка на файл:</b>\n"
+                f"<code>{botlink}</code>\n\n"
+                f"Отправьте GIF для поста:",
                 parse_mode=ParseMode.HTML
             )
             return ADD_MEDIA
@@ -403,21 +308,28 @@ async def add_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif query.data == 'media_skip':
             context.user_data['post']['media_type'] = None
             await query.edit_message_text(
-                "⏭ Медиа пропущено.\n\n"
-                "Теперь введите заголовок поста или /skip чтобы пропустить:"
+                f"⏭ Медиа пропущено.\n\n"
+                f"🔗 <b>Ссылка на файл:</b>\n"
+                f"<code>{botlink}</code>\n\n"
+                f"Введите описание поста (или нажмите кнопку):",
+                parse_mode=ParseMode.HTML,
+                reply_markup=desc_keyboard()
             )
-            return ADD_TITLE
+            return ADD_DESC
             
         elif query.data == 'media_none':
             context.user_data['post']['media_type'] = 'none'
             context.user_data['post']['media_path'] = ""
             context.user_data['post']['media_id'] = ""
             await query.edit_message_text(
-                "❌ Пост без медиа.\n\n"
-                "Теперь введите заголовок поста или /skip чтобы пропустить:"
+                f"❌ Пост без медиа.\n\n"
+                f"🔗 <b>Ссылка на файл:</b>\n"
+                f"<code>{botlink}</code>\n\n"
+                f"Введите описание поста (или нажмите кнопку):",
+                parse_mode=ParseMode.HTML,
+                reply_markup=desc_keyboard()
             )
-            return ADD_TITLE
-    
+            return ADD_DESC
     elif update.message:
         message = update.message
         
@@ -431,11 +343,19 @@ async def add_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['post']['media_path'] = media_path
             context.user_data['post']['media_id'] = photo.file_id
             
+            file_id = context.user_data['post']['file_id']
+            bot_username = (await context.bot.get_me()).username
+            botlink = f"https://t.me/{bot_username}?start={file_id}"
+            
             await message.reply_text(
-                "✅ Фото сохранено!\n\n"
-                "Теперь введите заголовок поста или /skip чтобы пропустить:"
+                f"✅ Фото сохранено!\n\n"
+                f"🔗 <b>Ссылка на файл:</b>\n"
+                f"<code>{botlink}</code>\n\n"
+                f"Введите описание поста (или нажмите кнопку):",
+                parse_mode=ParseMode.HTML,
+                reply_markup=desc_keyboard()
             )
-            return ADD_TITLE
+            return ADD_DESC
         
         elif message.video:
             video = message.video
@@ -447,11 +367,19 @@ async def add_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['post']['media_path'] = media_path
             context.user_data['post']['media_id'] = video.file_id
             
+            file_id = context.user_data['post']['file_id']
+            bot_username = (await context.bot.get_me()).username
+            botlink = f"https://t.me/{bot_username}?start={file_id}"
+            
             await message.reply_text(
-                "✅ Видео сохранено!\n\n"
-                "Теперь введите заголовок поста или /skip чтобы пропустить:"
+                f"✅ Видео сохранено!\n\n"
+                f"🔗 <b>Ссылка на файл:</b>\n"
+                f"<code>{botlink}</code>\n\n"
+                f"Введите описание поста (или нажмите кнопку):",
+                parse_mode=ParseMode.HTML,
+                reply_markup=desc_keyboard()
             )
-            return ADD_TITLE
+            return ADD_DESC
         
         elif message.animation:
             gif = message.animation
@@ -463,55 +391,702 @@ async def add_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['post']['media_path'] = media_path
             context.user_data['post']['media_id'] = gif.file_id
             
+            file_id = context.user_data['post']['file_id']
+            bot_username = (await context.bot.get_me()).username
+            botlink = f"https://t.me/{bot_username}?start={file_id}"
+            
             await message.reply_text(
-                "✅ GIF сохранен!\n\n"
-                "Теперь введите заголовок поста или /skip чтобы пропустить:"
+                f"✅ GIF сохранен!\n\n"
+                f"🔗 <b>Ссылка на файл:</b>\n"
+                f"<code>{botlink}</code>\n\n"
+                f"Введите описание поста (или нажмите кнопку):",
+                parse_mode=ParseMode.HTML,
+                reply_markup=desc_keyboard()
             )
-            return ADD_TITLE
-        
-        elif message.text and message.text.lower() == '/skip':
-            context.user_data['post']['media_type'] = None
-            await message.reply_text(
-                "⏭ Медиа пропущено.\n\n"
-                "Теперь введите заголовок поста или /skip чтобы пропустить:"
-            )
-            return ADD_TITLE
+            return ADD_DESC
     
     return ADD_MEDIA
 
-async def add_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text.lower() == '/skip':
-        context.user_data['post']['title'] = ""
-        await update.message.reply_text(
-            "⏭ Заголовок пропущен.\n\n"
-            "Теперь введите описание поста или /skip чтобы пропустить:"
-        )
-        return ADD_DESC
-    else:
-        context.user_data['post']['title'] = update.message.text
-        await update.message.reply_text(
-            "✅ Заголовок сохранен!\n\n"
-            "Теперь введите описание поста или /skip чтобы пропустить:"
-        )
-        return ADD_DESC
-
 async def add_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text.lower() == '/skip':
-        context.user_data['post']['description'] = ""
-        await update.message.reply_text(
-            "⏭ Описание пропущено.\n\n"
-            "Настройте пост с помощью клавиатуры:",
-            reply_markup=admin_kb()
-        )
-        return ADMIN_PANEL
-    else:
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        
+        file_id = context.user_data['post']['file_id']
+        bot_username = (await context.bot.get_me()).username
+        botlink = f"https://t.me/{bot_username}?start={file_id}"
+        
+        if query.data == 'skip_desc':
+            context.user_data['post']['description'] = ""
+            await query.edit_message_text(
+                f"⏭ Описание пропущено.\n\n"
+                f"🔗 <b>Ссылка на файл:</b>\n"
+                f"<code>{botlink}</code>\n\n"
+                f"Настройте пост с помощью клавиатуры:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=admin_kb()
+            )
+            return ADMIN_PANEL
+            
+        elif query.data == 'back_desc':
+            await query.edit_message_text(
+                f"🖼 Выберите тип медиа для поста:\n\n"
+                f"🔗 <b>Ссылка на файл:</b>\n"
+                f"<code>{botlink}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=media_type_keyboard()
+            )
+            return ADD_MEDIA
+    elif update.message:
         context.user_data['post']['description'] = update.message.text
+        
+        file_id = context.user_data['post']['file_id']
+        bot_username = (await context.bot.get_me()).username
+        botlink = f"https://t.me/{bot_username}?start={file_id}"
+        
         await update.message.reply_text(
-            "✅ Описание сохранено!\n\n"
-            "Настройте пост с помощью клавиатуры:",
+            f"✅ Описание сохранено!\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            f"Настройте пост с помощью клавиатуры:",
+            parse_mode=ParseMode.HTML,
             reply_markup=admin_kb()
         )
         return ADMIN_PANEL
+    
+    return ADD_DESC
+
+# ========== РЕДАКТИРОВАНИЕ ==========
+async def edit_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик для редактирования заголовка"""
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        
+        file_id = context.user_data['post']['file_id']
+        bot_username = (await context.bot.get_me()).username
+        botlink = f"https://t.me/{bot_username}?start={file_id}"
+        
+        await query.edit_message_text(
+            f"✏️ <b>Редактирование заголовка</b>\n\n"
+            f"Текущий заголовок: {context.user_data['post']['title']}\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            f"Введите новый заголовок:",
+            parse_mode=ParseMode.HTML
+        )
+        return EDIT_TITLE
+    
+    elif update.message:
+        # Сохраняем новый заголовок
+        new_title = update.message.text
+        context.user_data['post']['title'] = new_title
+        
+        file_id = context.user_data['post']['file_id']
+        bot_username = (await context.bot.get_me()).username
+        botlink = f"https://t.me/{bot_username}?start={file_id}"
+        
+        await update.message.reply_text(
+            f"✅ Заголовок изменен!\n\n"
+            f"Новый заголовок: {new_title}\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            f"Настройте пост с помощью клавиатуры:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_kb()
+        )
+        return ADMIN_PANEL
+    
+    return EDIT_TITLE
+
+async def edit_description_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик для редактирования описания"""
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        
+        file_id = context.user_data['post']['file_id']
+        bot_username = (await context.bot.get_me()).username
+        botlink = f"https://t.me/{bot_username}?start={file_id}"
+        
+        current_desc = context.user_data['post'].get('description', '')
+        if not current_desc:
+            current_desc = "Описание отсутствует"
+        
+        await query.edit_message_text(
+            f"📝 <b>Редактирование описания</b>\n\n"
+            f"Текущее описание: {current_desc}\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            f"Введите новое описание:",
+            parse_mode=ParseMode.HTML
+        )
+        return EDIT_DESC
+    
+    elif update.message:
+        # Сохраняем новое описание
+        new_desc = update.message.text
+        context.user_data['post']['description'] = new_desc
+        
+        file_id = context.user_data['post']['file_id']
+        bot_username = (await context.bot.get_me()).username
+        botlink = f"https://t.me/{bot_username}?start={file_id}"
+        
+        await update.message.reply_text(
+            f"✅ Описание изменено!\n\n"
+            f"Новое описание: {new_desc}\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            f"Настройте пост с помощью клавиатуры:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_kb()
+        )
+        return ADMIN_PANEL
+    
+    return EDIT_DESC
+
+async def edit_buttons_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Меню редактирования кнопок"""
+    query = update.callback_query
+    await query.answer()
+    
+    post = context.user_data['post']
+    file_id = post['file_id']
+    bot_username = (await context.bot.get_me()).username
+    botlink = f"https://t.me/{bot_username}?start={file_id}"
+    
+    # Создаем клавиатуру для управления кнопками
+    keyboard = []
+    
+    # Показываем текущие кнопки
+    buttons = post.get('buttons', [])
+    if buttons:
+        for i, btn in enumerate(buttons):
+            keyboard.append([InlineKeyboardButton(
+                f"✏️ Кнопка {i+1}: {btn['label']}", 
+                callback_data=f'editbtn_{i}'
+            )])
+    
+    # Кнопки действий
+    action_buttons = []
+    action_buttons.append(InlineKeyboardButton("➕ Добавить", callback_data='add_btn'))
+    if buttons:
+        action_buttons.append(InlineKeyboardButton("🗑 Очистить все", callback_data='clear_buttons'))
+    
+    keyboard.append(action_buttons)
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data='back_to_admin')])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"🔘 <b>Редактирование кнопок</b>\n\n"
+        f"Текущие кнопки: {len(buttons)} шт.\n\n"
+        f"🔗 <b>Ссылка на файл:</b>\n"
+        f"<code>{botlink}</code>\n\n"
+        f"Выберите действие:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup
+    )
+    return EDIT_BUTTONS
+
+async def clear_all_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Очищает все кнопки"""
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data['post']['buttons'] = []
+    
+    file_id = context.user_data['post']['file_id']
+    bot_username = (await context.bot.get_me()).username
+    botlink = f"https://t.me/{bot_username}?start={file_id}"
+    
+    await query.edit_message_text(
+        f"✅ Все кнопки удалены!\n\n"
+        f"🔗 <b>Ссылка на файл:</b>\n"
+        f"<code>{botlink}</code>\n\n"
+        f"Настройте пост с помощью клавиатуры:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_kb()
+    )
+    return ADMIN_PANEL
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    post = context.user_data['post']
+    
+    file_id = post['file_id']
+    bot_username = (await context.bot.get_me()).username
+    botlink = f"https://t.me/{bot_username}?start={file_id}"
+
+    if query.data == "set_media":
+        await query.edit_message_text(
+            f"🖼 <b>Выберите тип медиа:</b>\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=media_type_keyboard()
+        )
+        return ADD_MEDIA
+
+    elif query.data == "edit_title":
+        return await edit_title_handler(update, context)
+
+    elif query.data == "edit_description":
+        return await edit_description_handler(update, context)
+
+    elif query.data == "edit_buttons":
+        return await edit_buttons_menu(update, context)
+
+    elif query.data == "clear_buttons":
+        return await clear_all_buttons(update, context)
+
+    elif query.data == "back_to_admin":
+        await query.edit_message_text(
+            f"🔧 <b>Настройка поста</b>\n\n"
+            f"📱 Заголовок: {post['title']}\n"
+            f"📝 Описание: {post.get('description', 'нет')[:50]}\n"
+            f"🔘 Кнопок: {len(post.get('buttons', []))}\n"
+            f"💧 Водяной знак: {'✅' if post['watermark'] != 'none' else '❌'}\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            f"Выберите что хотите изменить:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_kb()
+        )
+        return ADMIN_PANEL
+
+    elif query.data == "set_watermark":
+        avatar_status = "✅ Есть" if os.path.exists(CUSTOM_AVATAR) else "❌ Нет (будет использована дефолтная)"
+        
+        await query.edit_message_text(
+            f"💎 <b>СТИЛЬНЫЙ ВОДЯНОЙ ЗНАК</b>\n\n"
+            f"<b>Аватарка канала:</b> {avatar_status}\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            "<b>Что будет:</b>\n"
+            "✅ <b>Аватарка</b> - круглая в правом верхнем углу\n"
+            "✅ <b>Название</b> - яркое под аватаркой\n"
+            "✅ <b>Ссылка на канал</b> - в правом нижнем углу",
+            parse_mode=ParseMode.HTML,
+            reply_markup=watermark_keyboard()
+        )
+        return ADD_WATERMARK
+
+    elif query.data == "watermark_avatar":
+        post['watermark'] = 'avatar'
+        
+        if os.path.exists(CUSTOM_AVATAR):
+            avatar_msg = "✅ Будет использована ВАША аватарка!"
+        else:
+            avatar_msg = "⚠️ Будет использована дефолтная аватарка!"
+        
+        await query.edit_message_text(
+            f"{avatar_msg}\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            "💎 <b>СТИЛЬНЫЕ ФИЧИ:</b>\n"
+            "1. <b>Круглая аватарка</b> в правом верхнем углу\n"
+            "2. <b>Название</b> ЯРКИМ цветом под аватаркой\n"
+            "3. <b>Ссылка на канал</b> @ANDRO_FILE в правом нижнем углу\n\n"
+            "Настройте пост:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_kb()
+        )
+        return ADMIN_PANEL
+
+    elif query.data == "watermark_no":
+        post['watermark'] = 'none'
+        await query.edit_message_text(
+            f"❌ Водяной знак не будет добавлен.\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            f"Настройте пост:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_kb()
+        )
+        return ADMIN_PANEL
+
+    elif query.data == "preview":
+        await show_preview(query, context)
+        
+        await query.message.reply_text(
+            f"Используйте клавиатуру:\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            f"📱 Заголовок: {post['title']}\n"
+            f"📝 Описание: {post.get('description', 'нет')[:50]}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_kb()
+        )
+        return ADMIN_PANEL
+
+    elif query.data == "add_btn":
+        context.user_data['editbtn'] = None
+        await query.edit_message_text(
+            f"Введите текст для кнопки:\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return ADD_BTN_LABEL
+
+    elif query.data.startswith("editbtn_"):
+        idx = int(query.data.split("_")[1])
+        context.user_data['editbtn'] = idx
+        btn = post['buttons'][idx]
+        await query.edit_message_text(
+            f"Редактируем кнопку №{idx + 1}: [{btn['label']}]\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            f"Введите новое название:",
+            parse_mode=ParseMode.HTML
+        )
+        return ADD_BTN_URL
+
+    elif query.data == "back":
+        await show_preview(query, context)
+        
+        await query.message.reply_text(
+            f"Используйте клавиатуру:\n\n"
+            f"🔗 <b>Ссылка на файл:</b>\n"
+            f"<code>{botlink}</code>\n\n"
+            f"📱 Заголовок: {post['title']}\n"
+            f"📝 Описание: {post.get('description', 'нет')[:50]}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_kb()
+        )
+        return ADMIN_PANEL
+
+    elif query.data == "publish":
+        try:
+            caption = render_post(post)
+            
+            media_path = post.get('media_path')
+            watermark_type = post.get('watermark', 'avatar')
+            title = post.get('title', '')
+            
+            print(f"🚀 Публикация поста...")
+            
+            # Создаем кнопки для поста
+            reply_markup = build_buttons(post) if post.get('buttons') else None
+            
+            if post['media_type'] == 'photo' and media_path and os.path.exists(media_path):
+                if watermark_type != 'none':
+                    watermarked_path = add_watermark_to_image(media_path, watermark_type, title)
+                else:
+                    watermarked_path = media_path
+                
+                with open(watermarked_path, "rb") as img:
+                    sent_message = await context.bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=img,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup
+                    )
+                    
+                    post_id = sent_message.message_id
+                    print(f"✅ Пост опубликован! ID поста: {post_id}")
+                    
+                    # Создаем ссылку на пост
+                    channel_name = CHANNEL_USERNAME.replace("@", "")
+                    post_link = f"https://t.me/{channel_name}/{post_id}"
+                    
+                    await asyncio.sleep(1)
+                    
+                    # Добавляем кнопку "Поделиться"
+                    share_button = [InlineKeyboardButton("📢 Поделиться", url=f"https://t.me/share/url?url={post_link}")]
+                    
+                    if reply_markup:
+                        existing_buttons = list(reply_markup.inline_keyboard)
+                        existing_buttons.append(share_button)
+                        new_markup = InlineKeyboardMarkup(existing_buttons)
+                    else:
+                        new_markup = InlineKeyboardMarkup([share_button])
+                    
+                    await context.bot.edit_message_reply_markup(
+                        chat_id=CHANNEL_ID,
+                        message_id=post_id,
+                        reply_markup=new_markup
+                    )
+                    
+                    print(f"🔗 Ссылка на пост: {post_link}")
+                
+                if watermarked_path != media_path and os.path.exists(watermarked_path):
+                    try:
+                        os.remove(watermarked_path)
+                    except:
+                        pass
+            
+            elif post['media_type'] == 'video' and media_path and os.path.exists(media_path):
+                with open(media_path, "rb") as video:
+                    sent_message = await context.bot.send_video(
+                        chat_id=CHANNEL_ID,
+                        video=video,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup
+                    )
+                    
+                    post_id = sent_message.message_id
+                    channel_name = CHANNEL_USERNAME.replace("@", "")
+                    post_link = f"https://t.me/{channel_name}/{post_id}"
+                    
+                    await asyncio.sleep(1)
+                    
+                    share_button = [InlineKeyboardButton("📢 Поделиться", url=f"https://t.me/share/url?url={post_link}")]
+                    
+                    if reply_markup:
+                        existing_buttons = list(reply_markup.inline_keyboard)
+                        existing_buttons.append(share_button)
+                        new_markup = InlineKeyboardMarkup(existing_buttons)
+                    else:
+                        new_markup = InlineKeyboardMarkup([share_button])
+                    
+                    await context.bot.edit_message_reply_markup(
+                        chat_id=CHANNEL_ID,
+                        message_id=post_id,
+                        reply_markup=new_markup
+                    )
+            
+            elif post['media_type'] == 'gif' and media_path and os.path.exists(media_path):
+                with open(media_path, "rb") as gif:
+                    sent_message = await context.bot.send_animation(
+                        chat_id=CHANNEL_ID,
+                        animation=gif,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup
+                    )
+                    
+                    post_id = sent_message.message_id
+                    channel_name = CHANNEL_USERNAME.replace("@", "")
+                    post_link = f"https://t.me/{channel_name}/{post_id}"
+                    
+                    await asyncio.sleep(1)
+                    
+                    share_button = [InlineKeyboardButton("📢 Поделиться", url=f"https://t.me/share/url?url={post_link}")]
+                    
+                    if reply_markup:
+                        existing_buttons = list(reply_markup.inline_keyboard)
+                        existing_buttons.append(share_button)
+                        new_markup = InlineKeyboardMarkup(existing_buttons)
+                    else:
+                        new_markup = InlineKeyboardMarkup([share_button])
+                    
+                    await context.bot.edit_message_reply_markup(
+                        chat_id=CHANNEL_ID,
+                        message_id=post_id,
+                        reply_markup=new_markup
+                    )
+            
+            else:
+                sent_message = await context.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup
+                )
+                
+                post_id = sent_message.message_id
+                channel_name = CHANNEL_USERNAME.replace("@", "")
+                post_link = f"https://t.me/{channel_name}/{post_id}"
+                
+                await asyncio.sleep(1)
+                
+                share_button = [InlineKeyboardButton("📢 Поделиться", url=f"https://t.me/share/url?url={post_link}")]
+                
+                if reply_markup:
+                    existing_buttons = list(reply_markup.inline_keyboard)
+                    existing_buttons.append(share_button)
+                    new_markup = InlineKeyboardMarkup(existing_buttons)
+                else:
+                    new_markup = InlineKeyboardMarkup([share_button])
+                
+                await context.bot.edit_message_reply_markup(
+                    chat_id=CHANNEL_ID,
+                    message_id=post_id,
+                    reply_markup=new_markup
+                )
+            
+            channel_name = CHANNEL_USERNAME.replace("@", "")
+            post_link = f"https://t.me/{channel_name}/{post_id}"
+            
+            await query.edit_message_text(
+                f"✅ <b>Пост опубликован!</b>\n\n"
+                f"🔗 <b>Ссылка на пост:</b>\n"
+                f"<code>{post_link}</code>",
+                parse_mode=ParseMode.HTML
+            )
+            
+        except Exception as e:
+            print(f"❌ ОШИБКА: {e}")
+            import traceback
+            traceback.print_exc()
+            await query.edit_message_text(f"❌ Ошибка: {str(e)[:100]}")
+        
+        return ConversationHandler.END
+
+    elif query.data == "cancel":
+        await query.edit_message_text("❌ Создание поста отменено.")
+        return ConversationHandler.END
+
+    await query.edit_message_text("❓ Неизвестная команда...")
+    return ADMIN_PANEL
+
+async def add_btn_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    label = update.message.text
+    context.user_data['btn_tmp_label'] = label
+    
+    file_id = context.user_data['post']['file_id']
+    bot_username = (await context.bot.get_me()).username
+    botlink = f"https://t.me/{bot_username}?start={file_id}"
+    
+    await update.message.reply_text(
+        f"Введите URL для кнопки:\n\n"
+        f"🔗 <b>Ссылка на файл:</b>\n"
+        f"<code>{botlink}</code>",
+        parse_mode=ParseMode.HTML
+    )
+    return ADD_BTN_URL
+
+async def add_btn_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text
+    label = context.user_data.get('btn_tmp_label', '')
+    idx = context.user_data.get('editbtn')
+    
+    if idx is not None:
+        context.user_data['post']['buttons'][idx] = {"label": label, "url": url}
+        context.user_data['editbtn'] = None
+    else:
+        if not label:
+            await update.message.reply_text("❌ Ошибка: не найден текст кнопки.")
+            return ADMIN_PANEL
+        context.user_data['post'].setdefault("buttons", []).append({"label": label, "url": url})
+    
+    await show_preview(update, context)
+    
+    file_id = context.user_data['post']['file_id']
+    bot_username = (await context.bot.get_me()).username
+    botlink = f"https://t.me/{bot_username}?start={file_id}"
+    
+    await update.message.reply_text(
+        f"✅ Кнопка {'изменена' if idx is not None else 'добавлена'}!\n\n"
+        f"🔗 <b>Ссылка на файл:</b>\n"
+        f"<code>{botlink}</code>\n\n"
+        f"Настройте пост с помощью клавиатуры:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_kb()
+    )
+    return ADMIN_PANEL
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Действие отменено.")
+    return ConversationHandler.END
+
+async def filebot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) == 1 and args[0].isdigit():
+        db = load_db()
+        file_key = args[0]
+        entry = db["files"].get(file_key)
+        if entry and "file_id" in entry:
+            caption = f"{SIGNATURE}"
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=entry["file_id"],
+                caption=caption
+            )
+        else:
+            await update.message.reply_text("Файл не найден.")
+    
+    else:
+        if update.effective_user.id != ADMIN_ID:
+            await update.message.reply_text("⛔ Этот бот приватный.")
+            return
+        
+        user = update.effective_user
+        username = user.username if user.username else user.first_name
+        
+        db = load_db()
+        files = db["files"]
+        
+        response = f"👋 {username}!\n"
+        response += f"📊 Файлов: {len(files)}\n"
+        response += f"🔢 Последний ID: {db['last_id']}\n\n"
+        response += "📋 <b>Команды:</b>\n"
+        response += "/post - создать пост для последнего файла\n"
+        response += "/del ID - удалить файл\n"
+        response += "/clear - очистить все файлы"
+        
+        await update.message.reply_text(response, parse_mode=ParseMode.HTML)
+
+# ------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ -------
+def render_post(post):
+    text = ""
+    if post.get('title'):
+        text += f"<b>{post['title']}</b>\n"
+        text += f"<b>____________________________________</b>\n"
+    
+    if post.get('description'):
+        text += f"📝 <b>Описание:</b>\n"
+        text += f"{post['description']}\n"
+    
+    text += f"\n🔗 {CHANNEL_USERNAME}\n"
+    text += f"<b>===========================</b>"
+    return text
+
+def build_buttons(post):
+    buttons = post.get("buttons", [])
+    
+    if not buttons:
+        return None
+    
+    rows = []
+    for i in range(0, len(buttons), 2):
+        row = []
+        btn_a = buttons[i]
+        row.append(InlineKeyboardButton(btn_a["label"], url=btn_a["url"]))
+        if i + 1 < len(buttons):
+            btn_b = buttons[i + 1]
+            row.append(InlineKeyboardButton(btn_b["label"], url=btn_b["url"]))
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+def admin_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📷 Медиа", callback_data='set_media')],
+        [InlineKeyboardButton("✏️ Заголовок", callback_data='edit_title'),
+         InlineKeyboardButton("📝 Описание", callback_data='edit_description')],
+        [InlineKeyboardButton("🔘 Кнопки", callback_data='edit_buttons')],
+        [InlineKeyboardButton("💧 Водяной знак", callback_data='set_watermark')],
+        [InlineKeyboardButton("📤 Опубликовать", callback_data='publish'),
+         InlineKeyboardButton("👁 Предпросмотр", callback_data='preview')],
+        [InlineKeyboardButton("❌ Отмена", callback_data='cancel')]
+    ])
+
+def media_type_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📷 Фото", callback_data='media_photo')],
+        [InlineKeyboardButton("🎬 Видео", callback_data='media_video')],
+        [InlineKeyboardButton("🎞 GIF", callback_data='media_gif')],
+        [InlineKeyboardButton("⏭ Пропустить медиа", callback_data='media_skip')],
+        [InlineKeyboardButton("❌ Без медиа", callback_data='media_none')]
+    ])
+
+def watermark_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ С аватаркой", callback_data='watermark_avatar')],
+        [InlineKeyboardButton("❌ Без водяного знака", callback_data='watermark_no')],
+        [InlineKeyboardButton("← Назад", callback_data='back')]
+    ])
+
+def desc_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭ Пропустить описание", callback_data='skip_desc')],
+        [InlineKeyboardButton("← Назад", callback_data='back_desc')]
+    ])
 
 async def show_preview(update, context):
     post = context.user_data['post']
@@ -523,8 +1098,10 @@ async def show_preview(update, context):
         
         caption = render_post(post)
         
-        if post['media_type'] == 'photo' and post.get('media_path') and os.path.exists(post['media_path']):
-            with open(post['media_path'], "rb") as img:
+        media_path = post.get('media_path')
+        
+        if post['media_type'] == 'photo' and media_path and os.path.exists(media_path):
+            with open(media_path, "rb") as img:
                 await send_to.reply_photo(
                     img,
                     caption=caption,
@@ -532,8 +1109,8 @@ async def show_preview(update, context):
                     reply_markup=build_buttons(post)
                 )
         
-        elif post['media_type'] == 'video' and post.get('media_path') and os.path.exists(post['media_path']):
-            with open(post['media_path'], "rb") as video:
+        elif post['media_type'] == 'video' and media_path and os.path.exists(media_path):
+            with open(media_path, "rb") as video:
                 await send_to.reply_video(
                     video,
                     caption=caption,
@@ -541,8 +1118,8 @@ async def show_preview(update, context):
                     reply_markup=build_buttons(post)
                 )
         
-        elif post['media_type'] == 'gif' and post.get('media_path') and os.path.exists(post['media_path']):
-            with open(post['media_path'], "rb") as gif:
+        elif post['media_type'] == 'gif' and media_path and os.path.exists(media_path):
+            with open(media_path, "rb") as gif:
                 await send_to.reply_animation(
                     gif,
                     caption=caption,
@@ -566,533 +1143,294 @@ async def show_preview(update, context):
             reply_markup=build_buttons(post)
         )
 
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    post = context.user_data['post']
-
-    if query.data == "set_media":
-        await query.edit_message_text(
-            "🖼 <b>Выберите тип медиа:</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=media_type_keyboard()
-        )
-        return ADD_MEDIA
-
-    elif query.data == "set_title":
-        await query.edit_message_text("Введите новый заголовок или /skip чтобы пропустить:")
-        return ADD_TITLE
-
-    elif query.data == "set_desc":
-        await query.edit_message_text("Введите новое описание или /skip чтобы пропустить:")
-        return ADD_DESC
-
-    elif query.data == "manage_buttons":
-        await query.edit_message_text("Редактирование кнопок:", reply_markup=btn_manage_kb(post))
-        return ADMIN_PANEL
-
-    elif query.data == "preview":
-        await show_preview(query, context)
-        await query.message.reply_text("Используйте клавиатуру для редактирования:", reply_markup=admin_kb())
-        return ADMIN_PANEL
-
-    elif query.data == "add_btn":
-        context.user_data['editbtn'] = None
-        await query.edit_message_text("Текст кнопки:")
-        return ADD_BTN_LABEL
-
-    elif query.data.startswith("editbtn_"):
-        idx = int(query.data.split("_")[1])
-        context.user_data['editbtn'] = idx
-        btn = post['buttons'][idx]
-        await query.edit_message_text(f"Редактируем кнопку №{idx + 1}: [{btn['label']}]",
-                                      reply_markup=edit_btn_kb(idx))
-        return ADMIN_PANEL
-
-    elif query.data.startswith("editbtn_label_"):
-        idx = int(query.data.split("_")[2])
-        context.user_data['editbtn'] = idx
-        await query.edit_message_text("Новое название для кнопки:")
-        return BTN_EDIT_LABEL
-
-    elif query.data.startswith("editbtn_url_"):
-        idx = int(query.data.split("_")[2])
-        context.user_data['editbtn'] = idx
-        await query.edit_message_text("Новый URL кнопки:")
-        return BTN_EDIT_URL
-
-    elif query.data.startswith("delbtn_"):
-        idx = int(query.data.split("_")[1])
-        post['buttons'].pop(idx)
-        await query.edit_message_text("Кнопка удалена.", reply_markup=btn_manage_kb(post))
-        return ADMIN_PANEL
-
-    elif query.data == "back":
-        await show_preview(query, context)
-        await query.message.reply_text("Используйте клавиатуру.", reply_markup=admin_kb())
-        return ADMIN_PANEL
-
-    elif query.data == "publish":
-        try:
-            caption = render_post(post)
-            
-            if post['media_type'] == 'photo' and post.get('media_path') and os.path.exists(post['media_path']):
-                with open(post['media_path'], "rb") as img:
-                    await context.bot.send_photo(
-                        chat_id=CHANNEL_ID,
-                        photo=img,
-                        caption=caption,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=build_buttons(post)
-                    )
-            
-            elif post['media_type'] == 'video' and post.get('media_path') and os.path.exists(post['media_path']):
-                with open(post['media_path'], "rb") as video:
-                    await context.bot.send_video(
-                        chat_id=CHANNEL_ID,
-                        video=video,
-                        caption=caption,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=build_buttons(post)
-                    )
-            
-            elif post['media_type'] == 'gif' and post.get('media_path') and os.path.exists(post['media_path']):
-                with open(post['media_path'], "rb") as gif:
-                    await context.bot.send_animation(
-                        chat_id=CHANNEL_ID,
-                        animation=gif,
-                        caption=caption,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=build_buttons(post)
-                    )
-            
-            else:
-                await context.bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=build_buttons(post)
-                )
-            
-            await query.edit_message_text("✅ Пост успешно опубликован!")
-            
-        except Exception as e:
-            await query.edit_message_text(f"❌ Ошибка при публикации: {e}")
+def create_default_avatar():
+    """Создает стильную дефолтную аватарку в кружке"""
+    try:
+        size = 256
+        img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
         
-        return ConversationHandler.END
+        # Яркая заливка
+        circle_color = (30, 144, 255)
+        draw.ellipse([(20, 20), (size - 20, size - 20)], fill=circle_color)
+        
+        # Белая обводка
+        draw.ellipse([(15, 15), (size - 15, size - 15)], outline=(255, 255, 255), width=5)
+        
+        # Буква A
+        try:
+            font = ImageFont.truetype("arialbd.ttf", 120)
+        except:
+            font = ImageFont.load_default()
+        
+        text = "A"
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        position = ((size - text_width) // 2, (size - text_height) // 2)
+        draw.text(position, text, font=font, fill=(255, 255, 255, 255))
+        
+        img.save(DEFAULT_AVATAR, "PNG")
+        print(f"✅ Создана дефолтная аватарка")
+        return DEFAULT_AVATAR
+        
+    except Exception as e:
+        print(f"❌ Ошибка при создании аватарки: {e}")
+        return None
 
-    elif query.data == "stats_admin":
-        await stats_command(Update(message=query.message, callback_query=query), context)
-        return ADMIN_PANEL
+def get_avatar_path():
+    """Возвращает путь к аватарке"""
+    if os.path.exists(CUSTOM_AVATAR):
+        return CUSTOM_AVATAR
+    else:
+        if not os.path.exists(DEFAULT_AVATAR):
+            create_default_avatar()
+        return DEFAULT_AVATAR
 
-    elif query.data == "cancel":
-        await query.edit_message_text("❌ Создание поста отменено.")
-        return ConversationHandler.END
+def make_circular_avatar(avatar_image):
+    """Преобразует изображение в круговую аватарку"""
+    try:
+        size = avatar_image.size[0]
+        
+        mask = Image.new('L', (size, size), 0)
+        draw = ImageDraw.Draw(mask)
+        draw.ellipse([(0, 0), (size, size)], fill=255)
+        
+        circular_avatar = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+        circular_avatar.paste(avatar_image, (0, 0), mask)
+        
+        # Добавляем белую обводку
+        border_size = 10
+        bordered_size = size + border_size * 2
+        bordered_avatar = Image.new('RGBA', (bordered_size, bordered_size), (0, 0, 0, 0))
+        draw_border = ImageDraw.Draw(bordered_avatar)
+        
+        draw_border.ellipse([(0, 0), (bordered_size, bordered_size)], outline=(255, 255, 255), width=5)
+        bordered_avatar.paste(circular_avatar, (border_size, border_size), circular_avatar)
+        
+        return bordered_avatar
+    except Exception as e:
+        return avatar_image
 
-    await query.edit_message_text("❓ Неизвестная команда...")
-    return ADMIN_PANEL
+def get_random_bright_color():
+    """Возвращает случайный яркий цвет"""
+    bright_colors = [
+        (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
+        (255, 0, 255), (0, 255, 255), (255, 128, 0), (255, 0, 128),
+        (128, 0, 255), (0, 255, 128),
+    ]
+    return random.choice(bright_colors)
 
-async def add_btn_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    label = update.message.text
-    context.user_data['btn_tmp_label'] = label
-    await update.message.reply_text("URL кнопки:")
-    return ADD_BTN_URL
+def get_font(size, bold=True):
+    """Получает шрифт"""
+    try:
+        font_paths = [
+            os.path.join(FONT_DIR, "Montserrat-Bold.ttf"),
+            os.path.join(FONT_DIR, "Roboto-Bold.ttf"),
+            "arialbd.ttf", "arial.ttf"
+        ]
+        
+        for font_path in font_paths:
+            if os.path.exists(font_path):
+                return ImageFont.truetype(font_path, size)
+        
+        return ImageFont.load_default()
+        
+    except:
+        return ImageFont.load_default()
 
-async def add_btn_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text
-    label = context.user_data.get('btn_tmp_label', '')
-    context.user_data['post'].setdefault("buttons", []).append({"label": label, "url": url})
-    await show_preview(update, context)
-    await update.message.reply_text("✅ Кнопка добавлена!", reply_markup=btn_manage_kb(context.user_data['post']))
-    return ADMIN_PANEL
+def add_watermark_to_image(image_path, watermark_type="avatar", title=""):
+    """Добавляет водяной знак - аватарка сверху справа, ссылка внизу справа"""
+    try:
+        if watermark_type == "none":
+            return image_path
+        
+        image = Image.open(image_path).convert('RGBA')
+        width, height = image.size
+        
+        watermark = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(watermark)
+        
+        if watermark_type == "avatar":
+            avatar_path = get_avatar_path()
+            
+            if avatar_path and os.path.exists(avatar_path):
+                avatar = Image.open(avatar_path).convert('RGBA')
+                avatar_size = min(120, max(70, min(width, height) // 10))
+                avatar = avatar.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
+                circular_avatar = make_circular_avatar(avatar)
+                
+                # Аватарка в правом верхнем углу
+                margin = 20
+                avatar_position = (width - avatar_size - margin - 10, margin)
+                watermark.paste(circular_avatar, avatar_position, circular_avatar)
+                
+                # Название под аватаркой
+                if title:
+                    title_color = get_random_bright_color()
+                    title_font_size = min(28, max(16, min(width, height) // 25))
+                    title_font = get_font(title_font_size, bold=True)
+                    
+                    if len(title) > 25:
+                        title_text = title[:22] + "..."
+                    else:
+                        title_text = title
+                    
+                    title_bbox = draw.textbbox((0, 0), title_text, font=title_font)
+                    title_width = title_bbox[2] - title_bbox[0]
+                    title_position = (width - title_width - margin, avatar_position[1] + avatar_size + 5)
+                    
+                    # Тень для названия
+                    for offset in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                        draw.text((title_position[0] + offset[0], title_position[1] + offset[1]),
+                                title_text, font=title_font, fill=(0, 0, 0, 200))
+                    
+                    draw.text(title_position, title_text, font=title_font, fill=(*title_color, 255))
+                    
+                    # Ссылка на канал в правом НИЖНЕМ углу
+                    link_font_size = max(14, min(22, title_font_size - 2))
+                    link_font = get_font(link_font_size, bold=True)
+                    link_text = CHANNEL_USERNAME
+                    
+                    link_bbox = draw.textbbox((0, 0), link_text, font=link_font)
+                    link_width = link_bbox[2] - link_bbox[0]
+                    link_height = link_bbox[3] - link_bbox[1]
+                    
+                    # Позиция в правом нижнем углу
+                    link_margin = 30
+                    link_position = (
+                        width - link_width - link_margin,
+                        height - link_height - link_margin
+                    )
+                    
+                    # Фон для ссылки
+                    bg_padding = 8
+                    draw.rounded_rectangle(
+                        [link_position[0] - bg_padding, link_position[1] - bg_padding,
+                         link_position[0] + link_width + bg_padding, link_position[1] + link_height + bg_padding],
+                        radius=8, fill=(0, 0, 0, 180)
+                    )
+                    
+                    # Белая ссылка
+                    draw.text(link_position, link_text, font=link_font, fill=(255, 255, 255, 255))
+        
+        watermarked = Image.alpha_composite(image, watermark)
+        watermarked_path = os.path.join(MEDIA_DIR, f"watermarked_{uuid4()}.png")
+        watermarked.save(watermarked_path, "PNG")
+        
+        return watermarked_path
+        
+    except Exception as e:
+        print(f"❌ Ошибка водяного знака: {e}")
+        return image_path
 
-async def btn_edit_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    idx = context.user_data.get('editbtn')
-    context.user_data['post']['buttons'][idx]['label'] = update.message.text
-    await show_preview(update, context)
-    await update.message.reply_text("✅ Название кнопки изменено.", reply_markup=btn_manage_kb(context.user_data['post']))
-    return ADMIN_PANEL
-
-async def btn_edit_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    idx = context.user_data.get('editbtn')
-    context.user_data['post']['buttons'][idx]['url'] = update.message.text
-    await show_preview(update, context)
-    await update.message.reply_text("✅ URL кнопки изменён.", reply_markup=btn_manage_kb(context.user_data['post']))
-    return ADMIN_PANEL
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Действие отменено.")
-    return ConversationHandler.END
-
-# =========== MAIN/START ==========
-
+# =========== MAIN ==========
 def main():
-    print("=" * 50)
-    print("🤖 ЗАПУСК ПРИВАТНОГО БОТА")
-    print("=" * 50)
+    print("=" * 60)
+    print("💎 ЗАПУСК БОТА")
+    print("=" * 60)
     print(f"👑 Бот работает ТОЛЬКО для ID: {ADMIN_ID}")
-    print("👥 Другие пользователи увидят только сообщение '⛔ Этот бот приватный.'")
-    print("=" * 50)
+    print(f"📢 Канал: {CHANNEL_USERNAME}")
+    print("=" * 60)
+    
+    create_default_avatar()
     
     if TELEGRAM_TOKEN == "ВАШ_ТОКЕН_ЗДЕСЬ":
-        print("❌ ОШИБКА: Замените TELEGRAM_TOKEN на ваш токен!")
+        print("❌ ОШИБКА: Замените TELEGRAM_TOKEN!")
+        return
+    
+    try:
+        from PIL import Image
+        print("✅ Библиотека PIL установлена")
+    except ImportError:
+        print("❌ Установите PIL: pip install Pillow")
         return
     
     db = load_db()
-    print(f"📊 Загружено файлов в БД: {len(db['files'])}")
+    print(f"📊 Файлов в базе: {len(db['files'])}")
     print(f"🔢 Последний ID: {db['last_id']}")
     
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    # ConversationHandler для /post
     conv = ConversationHandler(
-        entry_points=[CommandHandler('post', adm_cmd)],
+        entry_points=[
+            CommandHandler('post', adm_cmd),
+            CallbackQueryHandler(start_create_post, pattern='^create_post_')
+        ],
         states={
             ADD_MEDIA: [
                 CallbackQueryHandler(add_media),
                 MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION, add_media),
-                MessageHandler(filters.TEXT & filters.Regex("^/skip$"), add_media)
-            ],
-            ADD_TITLE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_title),
-                MessageHandler(filters.TEXT & filters.Regex("^/skip$"), add_title)
             ],
             ADD_DESC: [
+                CallbackQueryHandler(add_desc),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_desc),
-                MessageHandler(filters.TEXT & filters.Regex("^/skip$"), add_desc)
             ],
             ADMIN_PANEL: [
                 CallbackQueryHandler(admin_panel),
             ],
-            ADD_BTN_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_btn_label)],
-            ADD_BTN_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_btn_url)],
-            BTN_EDIT_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, btn_edit_label)],
-            BTN_EDIT_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, btn_edit_url)],
+            ADD_WATERMARK: [
+                CallbackQueryHandler(admin_panel),
+            ],
+            ADD_BTN_LABEL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_btn_label),
+            ],
+            ADD_BTN_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_btn_url),
+            ],
+            EDIT_TITLE: [
+                CallbackQueryHandler(edit_title_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_title_handler),
+            ],
+            EDIT_DESC: [
+                CallbackQueryHandler(edit_description_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_description_handler),
+            ],
+            EDIT_BUTTONS: [
+                CallbackQueryHandler(admin_panel),
+            ],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
-        allow_reentry=True,
+        allow_reentry=True
     )
     
+    # Регистрируем команды
     app.add_handler(CommandHandler('start', filebot_start))
-    app.add_handler(CommandHandler('list', list_files))
-    app.add_handler(CommandHandler('info', file_info))
-    app.add_handler(CommandHandler('clear', clear_files))
     app.add_handler(CommandHandler('del', del_file))
-    app.add_handler(CommandHandler('stats', stats_command))
+    app.add_handler(CommandHandler('clear', clear_files))
+    app.add_handler(CallbackQueryHandler(clear_callback, pattern='^clear_'))
     app.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_apk))
     app.add_handler(conv)
 
-    print("✅ БОТ УСПЕШНО ЗАПУЩЕН!")
-    print("=" * 50)
-    print(f"📢 Канал: {CHANNEL_ID}")
-    print(f"📁 Файлы хранятся в: {FILE_DB}")
-    print(f"🖼 Медиа сохраняются в: {MEDIA_DIR}")
-    print("=" * 50)
+    print("✅ БОТ ЗАПУЩЕН!")
+    print("=" * 60)
+    print("📋 КОМАНДЫ:")
+    print("   • /start - приветствие")
+    print("   • /post - создать пост для последнего файла")
+    print("   • /del ID - удалить файл")
+    print("   • /clear - очистить все файлы")
+    print("=" * 60)
+    print("✏️ ПОЛНОЕ РЕДАКТИРОВАНИЕ:")
+    print("   • Заголовок - можно изменить")
+    print("   • Описание - можно изменить")  
+    print("   • Кнопки - можно добавить/изменить/удалить")
+    print("=" * 60)
+    print("🖼 ВОДЯНОЙ ЗНАК:")
+    print("   • Аватарка - в правом верхнем углу")
+    print("   • Название - под аватаркой")
+    print("   • Ссылка на канал - в правом НИЖНЕМ углу")
+    print("=" * 60)
     
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n🛑 Бот остановлен пользователем")
+        print("\n\n🛑 Бот остановлен")
     except Exception as e:
-        print(f"\n\n❌ Ошибка при запуске бота: {e}")async def del_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) == 1 and args[0].isdigit():
-        db = load_db()
-        file_key = args[0]
-        if file_key in db:
-            fname = db[file_key]["file_name"]
-            del db[file_key]
-            save_db(db)
-            await update.message.reply_text(f"Файл №{file_key} ({fname}) удалён.")
-        else:
-            await update.message.reply_text("Файл с таким номером не найден.")
-    else:
-        await update.message.reply_text("Используйте: /del N, где N — номер файла.")
-
-async def filebot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) == 1 and args[0].isdigit():
-        db = load_db()
-        file_key = args[0]
-        entry = db.get(file_key)
-        if entry and "file_id" in entry:
-            caption = f"Ваш файл: {entry.get('file_name', 'File')}\nПодпись: {SIGNATURE}"
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=entry["file_id"],
-                caption=caption
-            )
-        else:
-            await update.message.reply_text("Файл не найден.")
-    else:
-        user = update.effective_user
-        username = user.username if user.username else user.first_name
-        await update.message.reply_text(
-            f"Привет, {username}!\n"
-            "Это Бот для выдачи файлов с канала.\n"
-            "@ANDRO_FILE"
-        )
-
-# ------- БЛОК АДМИНКИ -------
-def render_post(post):
-    return (
-        f"<b>{post['title']}</b>\n"
-        f"<b>________________________________</b>\n"  # Верхняя линия
-        f"📝 <b>Описание:</b>\n"
-        f"{post['description']}\n"
-        f"<b>=========================</b>"  # Нижняя линия с "===" в конце
-    )
-
-# --- Кнопки по 2 в ряд ---
-def build_buttons(post):
-    buttons = post.get("buttons", [])
-    if not buttons:
-        return None
-    rows = []
-    for i in range(0, len(buttons), 2):
-        row = []
-        btn_a = buttons[i]
-        row.append(InlineKeyboardButton(btn_a["label"], url=btn_a["url"]))
-        if i + 1 < len(buttons):
-            btn_b = buttons[i + 1]
-            row.append(InlineKeyboardButton(btn_b["label"], url=btn_b["url"]))
-        rows.append(row)
-    return InlineKeyboardMarkup(rows)
-
-def admin_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📷 Фото", callback_data='set_photo'),
-         InlineKeyboardButton("Заголовок", callback_data='set_title')],
-        [InlineKeyboardButton("Описание", callback_data='set_desc')],
-        [InlineKeyboardButton("Кнопки", callback_data='manage_buttons')],
-        [InlineKeyboardButton("📤 Опубликовать", callback_data='publish')],
-        [InlineKeyboardButton("❌ Отмена", callback_data='cancel')]
-    ])
-
-def btn_manage_kb(post):
-    kb = [[InlineKeyboardButton(f"✏ {i + 1}: {btn['label']}", callback_data=f'editbtn_{i}')]
-          for i, btn in enumerate(post.get('buttons', []))]
-    kb.append([InlineKeyboardButton("➕ Добавить", callback_data='add_btn')])
-    kb.append([InlineKeyboardButton("← Назад", callback_data='back')])
-    return InlineKeyboardMarkup(kb)
-
-def edit_btn_kb(idx):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("↩ Название", callback_data=f'editbtn_label_{idx}')],
-        [InlineKeyboardButton("🌐 URL", callback_data=f'editbtn_url_{idx}')],
-        [InlineKeyboardButton("❌ Удалить", callback_data=f'delbtn_{idx}')],
-        [InlineKeyboardButton("← Назад", callback_data='manage_buttons')]
-    ])
-
-async def adm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещён.")
-        return ConversationHandler.END
-    context.user_data['post'] = {
-        "image_path": "",
-        "title": "",
-        "description": "",
-        "buttons": []
-    }
-    await update.message.reply_text("🔹 Отправьте картинку для поста.")
-    return ADD_PHOTO
-
-async def add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.photo:
-        photo = update.message.photo[-1]
-        file = await photo.get_file()
-        img_path = os.path.join(IMAGES_DIR, f"{uuid4()}.jpg")
-        await file.download_to_drive(img_path)
-        context.user_data['post']['image_path'] = img_path
-        await update.message.reply_text("Теперь введите заголовок:")
-        return ADD_TITLE
-    else:
-        await update.message.reply_text("Теперь введите заголовок:")
-        return ADD_TITLE
-
-async def add_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['post']["title"] = update.message.text
-    await update.message.reply_text("Введите описание поста:")
-    return ADD_DESC
-
-async def add_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['post']["description"] = update.message.text
-    await show_preview(update, context)
-    await update.message.reply_text("Используйте клавиатуру.", reply_markup=admin_kb())
-    return ADMIN_PANEL
-
-async def show_preview(update, context):
-    post = context.user_data['post']
-    try:
-        if hasattr(update, "message") and update.message:
-            send_to = update.message
-        else:
-            send_to = update
-        if post['image_path']:
-            with open(post['image_path'], "rb") as img:
-                await send_to.reply_photo(img,
-                                           caption=render_post(post),
-                                           parse_mode=ParseMode.HTML, reply_markup=build_buttons(post))
-        else:
-            await send_to.reply_text(render_post(post), parse_mode=ParseMode.HTML, reply_markup=build_buttons(post))
-    except Exception:
-        pass
-
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    post = context.user_data['post']
-
-    if query.data == "set_photo":
-        await query.edit_message_text("Отправьте новую картинку.")
-        return ADD_PHOTO
-
-    if query.data == "set_title":
-        await query.edit_message_text("Введите новый заголовок:")
-        return ADD_TITLE
-
-    if query.data == "set_desc":
-        await query.edit_message_text("Введите новое описание:")
-        return ADD_DESC
-
-    if query.data == "manage_buttons":
-        await query.edit_message_text("Редактирование кнопок:", reply_markup=btn_manage_kb(post))
-        return ADMIN_PANEL
-
-    if query.data == "add_btn":
-        context.user_data['editbtn'] = None
-        await query.edit_message_text("Текст кнопки:")
-        return ADD_BTN_LABEL
-
-    if query.data.startswith("editbtn_"):
-        idx = int(query.data.split("_")[1])
-        context.user_data['editbtn'] = idx
-        btn = post['buttons'][idx]
-        await query.edit_message_text(f"Редактируем кнопку №{idx + 1}: [{btn['label']}]",
-                                      reply_markup=edit_btn_kb(idx))
-        return ADMIN_PANEL
-
-    if query.data.startswith("editbtn_label_"):
-        idx = int(query.data.split("_")[2])
-        context.user_data['editbtn'] = idx
-        await query.edit_message_text("Новое название для кнопки:")
-        return BTN_EDIT_LABEL
-
-    if query.data.startswith("editbtn_url_"):
-        idx = int(query.data.split("_")[2])
-        context.user_data['editbtn'] = idx
-        await query.edit_message_text("Новый URL кнопки:")
-        return BTN_EDIT_URL
-
-    if query.data.startswith("delbtn_"):
-        idx = int(query.data.split("_")[1])
-        post['buttons'].pop(idx)
-        await query.edit_message_text("Кнопка удалена.", reply_markup=btn_manage_kb(post))
-        return ADMIN_PANEL
-
-    if query.data == "back":
-        await show_preview(query, context)
-        await query.message.reply_text("Используйте клавиатуру.", reply_markup=admin_kb())
-        return ADMIN_PANEL
-
-    if query.data == "publish":
-        try:
-            if post['image_path']:
-                with open(post['image_path'], "rb") as img:
-                    await context.bot.send_photo(
-                        chat_id=CHANNEL_ID,
-                        photo=img,
-                        caption=render_post(post),
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=build_buttons(post)
-                    )
-            else:
-                await context.bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=render_post(post),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=build_buttons(post)
-                )
-            await query.edit_message_text("✅ Пост опубликован!")
-        except Exception as e:
-            await query.edit_message_text(f"Ошибка: {e}")
-        return ConversationHandler.END
-
-    if query.data == "cancel":
-        await query.edit_message_text("Создание поста отменено.")
-        return ConversationHandler.END
-
-    await query.edit_message_text("?? Неизвестная команда...")
-    return ADMIN_PANEL
-
-async def add_btn_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    label = update.message.text
-    context.user_data['btn_tmp_label'] = label
-    await update.message.reply_text("URL кнопки:")
-    return ADD_BTN_URL
-
-async def add_btn_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text
-    label = context.user_data.get('btn_tmp_label', '')
-    context.user_data['post'].setdefault("buttons", []).append({"label": label, "url": url})
-    await show_preview(update, context)
-    await update.message.reply_text("Кнопка добавлена!", reply_markup=btn_manage_kb(context.user_data['post']))
-    return ADMIN_PANEL
-
-async def btn_edit_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    idx = context.user_data.get('editbtn')
-    context.user_data['post']['buttons'][idx]['label'] = update.message.text
-    await show_preview(update, context)
-    await update.message.reply_text("Название кнопки изменено.", reply_markup=btn_manage_kb(context.user_data['post']))
-    return ADMIN_PANEL
-
-async def btn_edit_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    idx = context.user_data.get('editbtn')
-    context.user_data['post']['buttons'][idx]['url'] = update.message.text
-    await show_preview(update, context)
-    await update.message.reply_text("URL кнопки изменён.", reply_markup=btn_manage_kb(context.user_data['post']))
-    return ADMIN_PANEL
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Действие отменено.")
-    return ConversationHandler.END
-
-# =========== MAIN/START ==========
-
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    conv = ConversationHandler(
-        entry_points=[CommandHandler('post', adm_cmd)],
-        states={
-            ADD_PHOTO: [MessageHandler(filters.PHOTO, add_photo),
-                        MessageHandler(filters.TEXT & filters.Regex("^/skip$"), add_photo)],
-            ADD_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_title)],
-            ADD_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_desc)],
-            ADMIN_PANEL: [
-                CallbackQueryHandler(admin_panel),
-            ],
-            ADD_BTN_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_btn_label)],
-            ADD_BTN_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_btn_url)],
-            BTN_EDIT_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, btn_edit_label)],
-            BTN_EDIT_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, btn_edit_url)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-        allow_reentry=True,
-    )
-    app.add_handler(CommandHandler('start', filebot_start))
-    app.add_handler(CommandHandler('list', list_files))
-    app.add_handler(CommandHandler('info', file_info))
-    app.add_handler(CommandHandler('clear', clear_files))
-    app.add_handler(CommandHandler('del', del_file))
-    app.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_apk))
-    app.add_handler(conv)
-
-    print("\nБОТ ЗАПУЩЕН!\n")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
-
+        print(f"\n\n❌ Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
