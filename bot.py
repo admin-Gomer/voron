@@ -26,7 +26,7 @@ warnings.filterwarnings(action="ignore", message=r".*CallbackQueryHandler", cate
 recent_welcome = {}
 
 # ======= НАСТРОЙКИ =======
-TELEGRAM_TOKEN = "8578375390:AAEV0xto8D_QB6umLxVtuNsUrx8Pjhk9Qv0"
+TELEGRAM_TOKEN = "8578375390:AAEV0xo8D_QB6umLxVtuNsUrx8Pjhk9Qv0"
 ADMIN_ID = 1129009422
 CHANNEL_ID = -1002329753497
 CHANNEL_USERNAME = "@ANDRO_FILE"
