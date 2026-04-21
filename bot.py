@@ -10,6 +10,8 @@ import shutil
 from datetime import datetime, timedelta
 import re
 import glob
+from functools import lru_cache
+from threading import Lock
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -26,7 +28,7 @@ warnings.filterwarnings(action="ignore", message=r".*CallbackQueryHandler", cate
 recent_welcome = {}
 
 # ======= НАСТРОЙКИ =======
-TELEGRAM_TOKEN = "8578375390:AAEV0xo8D_QB6umLxVtuNsUrx8Pjhk9Qv0"
+TELEGRAM_TOKEN = "8578375390:AAEV0xto8D_QB6umLxVtuNsUrx8Pjhk9Qv0"
 ADMIN_ID = 1129009422
 CHANNEL_ID = -1002329753497
 CHANNEL_USERNAME = "@ANDRO_FILE"
@@ -36,7 +38,10 @@ SIGNATURE = "@ANDRO_FILE"
 MEDIA_DIR = "admin_media"
 WATERMARK_DIR = "watermarks"
 FONT_DIR = "fonts"
-DEFAULT_AVATARS_DIR = "default_avatars"
+
+# ===== НОВЫЕ ПАПКИ ДЛЯ АВАТАРОК =====
+WELCOME_AVATARS_DIR = "welcome_avatars"
+GOODBYE_AVATARS_DIR = "goodbye_avatars"
 
 DONATE_LINK = "https://www.donationalerts.com/r/Mikhail36"
 REACTIONS = ["🔥", "❤️", "👍", "🎉", "👏", "😍", "😎", "🤔", "😱", "🥰", "💯", "✨"]
@@ -45,19 +50,134 @@ ENABLE_GROUP_GREETINGS = True
 ENABLE_ALL_GROUPS = True
 GROUP_IDS_FILE = "group_ids.json"
 
+# ===== НАСТРОЙКА КНОПКИ ПОДЕЛИТЬСЯ =====
+ENABLE_SHARE_BUTTON = True  # True - кнопка есть, False - кнопки нет
+
 CUSTOM_AVATAR = os.path.join(WATERMARK_DIR, "custom_avatar.png")
 DEFAULT_AVATAR = os.path.join(WATERMARK_DIR, "default_avatar.png")
 
+# Создаём все необходимые папки
 os.makedirs(MEDIA_DIR, exist_ok=True)
 os.makedirs(WATERMARK_DIR, exist_ok=True)
 os.makedirs(FONT_DIR, exist_ok=True)
-os.makedirs(DEFAULT_AVATARS_DIR, exist_ok=True)
+os.makedirs(WELCOME_AVATARS_DIR, exist_ok=True)
+os.makedirs(GOODBYE_AVATARS_DIR, exist_ok=True)
+
+# ===== ОПТИМИЗАЦИЯ БАЗЫ ДАННЫХ =====
+file_cache = {}
+cache_lock = Lock()
+CACHE_SIZE = 100  # Храним в памяти только 100 файлов
+
 # =========================
 
-(ADD_MEDIA, ADD_DESC, ADD_BTN_LABEL, ADD_BTN_URL, 
+(ADD_MEDIA, ADD_DESC, ADD_BTN_LABEL, ADD_BTN_URL, ADD_BTN_URL_CUSTOM,
  ADMIN_PANEL, BTN_EDIT_LABEL, ADD_WATERMARK, 
  EDIT_TITLE, EDIT_DESC, EDIT_BUTTONS,
- ADD_DONATION) = range(11)
+ ADD_DONATION) = range(12)
+
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ (ОПТИМИЗИРОВАННЫЕ) ==========
+def load_db():
+    """Загружает только метаданные, а не все файлы"""
+    if not os.path.exists(FILE_DB):
+        with open(FILE_DB, "w", encoding="utf-8") as f:
+            json.dump({"files": {}, "last_id": 0, "file_ids": []}, f)
+        return {"files": {}, "last_id": 0, "file_ids": []}
+    try:
+        with open(FILE_DB, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if "file_ids" not in data:
+                file_ids = list(data.get("files", {}).keys())
+                data["file_ids"] = file_ids
+                if "files" in data and len(data["files"]) > CACHE_SIZE:
+                    sorted_ids = sorted(data["files"].keys(), key=int, reverse=True)
+                    data["files"] = {k: data["files"][k] for k in sorted_ids[:CACHE_SIZE]}
+                save_db(data)
+            return data
+    except:
+        data = {"files": {}, "last_id": 0, "file_ids": []}
+        save_db(data)
+        return data
+
+def save_db(db):
+    with open(FILE_DB, "w", encoding="utf-8") as f:
+        json.dump(db, f, indent=2, ensure_ascii=False)
+
+def get_file_by_id(file_id: str):
+    """Получает файл из кэша или базы"""
+    global file_cache
+    
+    with cache_lock:
+        if file_id in file_cache:
+            return file_cache[file_id]
+    
+    try:
+        with open(FILE_DB, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            files = data.get("files", {})
+            if file_id in files:
+                result = files[file_id]
+                with cache_lock:
+                    file_cache[file_id] = result
+                    if len(file_cache) > CACHE_SIZE:
+                        oldest = next(iter(file_cache))
+                        del file_cache[oldest]
+                return result
+    except:
+        pass
+    return None
+
+def save_file_to_db(file_id: str, file_data: dict):
+    """Сохраняет файл в базу"""
+    try:
+        with open(FILE_DB, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        if "files" not in data:
+            data["files"] = {}
+        data["files"][file_id] = file_data
+        
+        if "file_ids" not in data:
+            data["file_ids"] = []
+        if file_id not in data["file_ids"]:
+            data["file_ids"].append(file_id)
+        
+        if int(file_id) > data.get("last_id", 0):
+            data["last_id"] = int(file_id)
+        
+        if len(data["files"]) > CACHE_SIZE * 2:
+            sorted_ids = sorted(data["files"].keys(), key=int, reverse=True)
+            data["files"] = {k: data["files"][k] for k in sorted_ids[:CACHE_SIZE]}
+        
+        save_db(data)
+        
+        with cache_lock:
+            file_cache[file_id] = file_data
+    except Exception as e:
+        print(f"Ошибка сохранения: {e}")
+
+def get_files_count():
+    """Возвращает количество файлов без загрузки всей базы"""
+    try:
+        with open(FILE_DB, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return len(data.get("file_ids", []))
+    except:
+        return 0
+
+# ========== ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ СЛУЧАЙНОЙ АВАТАРКИ ==========
+def get_random_avatar_from_folder(folder_path):
+    try:
+        if not os.path.exists(folder_path):
+            return None
+        avatar_files = []
+        for ext in ['*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp']:
+            avatar_files.extend(glob.glob(os.path.join(folder_path, ext)))
+            avatar_files.extend(glob.glob(os.path.join(folder_path, ext.upper())))
+        if avatar_files:
+            return random.choice(avatar_files)
+        return None
+    except Exception:
+        return None
 
 # ========== ФУНКЦИЯ ДЛЯ ИЗВЛЕЧЕНИЯ ВЕРСИИ ==========
 def extract_version_from_filename(filename):
@@ -128,18 +248,10 @@ async def download_avatar(user_id: int, context: ContextTypes.DEFAULT_TYPE):
             avatar = Image.open(avatar_bytes).convert('RGBA')
             avatar = avatar.resize((200, 200), Image.Resampling.LANCZOS)
             return avatar, False
-        default_avatar_path = get_default_avatar()
-        if default_avatar_path and os.path.exists(default_avatar_path):
-            if is_gif_file(default_avatar_path):
-                return default_avatar_path, True
-            else:
-                avatar = Image.open(default_avatar_path).convert('RGBA')
-                avatar = avatar.resize((200, 200), Image.Resampling.LANCZOS)
-                return avatar, False
         else:
-            return create_placeholder_avatar(), False
+            return None, False
     except Exception:
-        return create_placeholder_avatar(), False
+        return None, False
 
 def create_placeholder_avatar():
     size = 200
@@ -162,63 +274,39 @@ def create_placeholder_avatar():
     draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255))
     return img
 
-def get_default_avatar():
-    try:
-        avatar_files = []
-        for ext in ['*.jpg', '*.jpeg', '*.png', '*.webp']:
-            avatar_files.extend(glob.glob(os.path.join(DEFAULT_AVATARS_DIR, ext)))
-            avatar_files.extend(glob.glob(os.path.join(DEFAULT_AVATARS_DIR, ext.upper())))
-        if avatar_files:
-            return random.choice(avatar_files)
+def load_custom_avatar(folder_path):
+    avatar_path = get_random_avatar_from_folder(folder_path)
+    if avatar_path:
+        if avatar_path.lower().endswith('.gif'):
+            return avatar_path, True
         else:
-            return create_default_avatar_placeholder()
-    except Exception:
-        return create_default_avatar_placeholder()
-
-def create_default_avatar_placeholder():
-    try:
-        placeholder_path = os.path.join(DEFAULT_AVATARS_DIR, "default_placeholder.png")
-        if os.path.exists(placeholder_path):
-            return placeholder_path
-        size = 500
-        img = Image.new('RGBA', (size, size), (30, 144, 255, 255))
-        draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("arialbd.ttf", 200)
-        except:
-            font = ImageFont.load_default()
-        text = "👤"
-        try:
-            bbox = font.getbbox(text)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-        except:
-            text_width = 100
-            text_height = 100
-        text_x = (size - text_width) // 2
-        text_y = (size - text_height) // 2
-        draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 255))
-        img.save(placeholder_path, "PNG")
-        return placeholder_path
-    except Exception:
-        return None
-
-def is_gif_file(file_path):
-    return file_path and file_path.lower().endswith('.gif')
+            try:
+                avatar = Image.open(avatar_path).convert('RGBA')
+                avatar = avatar.resize((200, 200), Image.Resampling.LANCZOS)
+                return avatar, False
+            except:
+                return create_placeholder_avatar(), False
+    return create_placeholder_avatar(), False
 
 async def create_welcome_image_group(username: str, user_id: int, context: ContextTypes.DEFAULT_TYPE, chat_info: dict):
     try:
         width, height = 650, 750
-        avatar, is_gif = await download_avatar(user_id, context)
-        if is_gif and isinstance(avatar, str):
-            import shutil
+        user_avatar, is_gif = await download_avatar(user_id, context)
+        
+        if user_avatar is None:
+            custom_avatar, is_gif = load_custom_avatar(WELCOME_AVATARS_DIR)
+            user_avatar = custom_avatar
+        
+        if is_gif and isinstance(user_avatar, str):
             gif_path = os.path.join(MEDIA_DIR, f"welcome_gif_{user_id}.gif")
-            shutil.copy2(avatar, gif_path)
+            shutil.copy2(user_avatar, gif_path)
             return gif_path, True
-        if avatar:
-            img = avatar.resize((width, height), Image.Resampling.LANCZOS).convert('RGBA')
+        
+        if user_avatar and not isinstance(user_avatar, str):
+            img = user_avatar.resize((width, height), Image.Resampling.LANCZOS).convert('RGBA')
         else:
             img = Image.new('RGBA', (width, height), (200, 200, 200, 255))
+        
         draw = ImageDraw.Draw(img)
         try:
             name_font = ImageFont.truetype("arialbd.ttf", 50)
@@ -252,20 +340,23 @@ async def create_welcome_image_group(username: str, user_id: int, context: Conte
 async def create_goodbye_image_group(username: str, user_id: int, context: ContextTypes.DEFAULT_TYPE, chat_info: dict):
     try:
         width, height = 650, 750
-        avatar, is_gif = await download_avatar(user_id, context)
-        if is_gif and isinstance(avatar, str):
+        custom_avatar, is_gif = load_custom_avatar(GOODBYE_AVATARS_DIR)
+        
+        if is_gif and isinstance(custom_avatar, str):
             try:
                 from PIL import ImageSequence
-                gif = Image.open(avatar)
+                gif = Image.open(custom_avatar)
                 for frame in ImageSequence.Iterator(gif):
-                    avatar = frame.convert('RGBA')
+                    custom_avatar = frame.convert('RGBA')
                     break
             except:
-                avatar = None
-        if avatar and not isinstance(avatar, str):
-            img = avatar.resize((width, height), Image.Resampling.LANCZOS).convert('RGBA')
+                custom_avatar = None
+        
+        if custom_avatar and not isinstance(custom_avatar, str):
+            img = custom_avatar.resize((width, height), Image.Resampling.LANCZOS).convert('RGBA')
         else:
             img = Image.new('RGBA', (width, height), (200, 200, 200, 255))
+        
         draw = ImageDraw.Draw(img)
         try:
             name_font = ImageFont.truetype("arialbd.ttf", 50)
@@ -369,7 +460,7 @@ async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 async def show_more_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает описание группы по кнопке Далее"""
+    """Показывает описание группы по кнопке Далее и удаляет через 3 минуты"""
     query = update.callback_query
     await query.answer()
     
@@ -390,32 +481,24 @@ async def show_more_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_reply_markup(reply_markup=None)
     
     # Отправляем описание
-    sent_msg = await query.message.reply_text(more_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    sent_message = await query.message.reply_text(more_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     
-    # Автоматически удаляем через 10 секунд
-    asyncio.create_task(auto_hide_callback(chat_id, sent_msg.message_id, context))
-async def auto_hide_callback(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Автоматически сворачивает описание через 10 секунд"""
-    await asyncio.sleep(10)
+    # Удаляем сообщение через 1 минуты (60 секунд)
+    await asyncio.sleep(60)
     try:
-        # Удаляем сообщение с описанием
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        await sent_message.delete()
     except:
-        pass    
+        pass  # Если сообщение уже удалено
 
-# ========== КОМАНДА УДАЛЕНИЯ #удалить @username ==========
+# ========== КОМАНДА УДАЛЕНИЯ #удалить ==========
 async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удаляет пользователя из группы по команде #удалить"""
-    
     chat_id = update.message.chat_id
     chat = update.message.chat
     
-    # Проверяем, что это группа
     if chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("❌ Эта команда работает только в группах!")
         return
     
-    # Проверяем права админа
     user_id = update.effective_user.id
     is_admin = user_id == ADMIN_ID
     
@@ -432,19 +515,15 @@ async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     message_text = update.message.text
     user_to_remove = None
     
-    # СПОСОБ 1: Ответ на сообщение
     if update.message.reply_to_message:
         user_to_remove = update.message.reply_to_message.from_user
-        print(f"✅ Удаление по ответу: {user_to_remove.first_name}")
     
-    # СПОСОБ 2: По ID в тексте
     if not user_to_remove:
         numbers = re.findall(r'\d+', message_text)
         for num in numbers:
-            if len(num) >= 5:  # ID обычно длинный
+            if len(num) >= 5:
                 try:
                     user_to_remove = await context.bot.get_chat(int(num))
-                    print(f"✅ Удаление по ID: {num}")
                     break
                 except:
                     pass
@@ -453,7 +532,6 @@ async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Не найден пользователь.\n\nИспользуйте:\n1. Ответьте на сообщение и напишите #удалить\n2. Или: #удалить ID_пользователя")
         return
     
-    # Проверки
     if user_to_remove.id == update.effective_user.id:
         await update.message.reply_text("❌ Нельзя удалить самого себя!")
         return
@@ -462,7 +540,6 @@ async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Нельзя удалить бота!")
         return
     
-    # Проверка прав бота
     try:
         bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
         if bot_member.status != 'administrator':
@@ -475,7 +552,6 @@ async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"❌ Ошибка прав бота: {e}")
         return
     
-    # Проверка, что цель не админ
     try:
         target = await context.bot.get_chat_member(chat_id, user_to_remove.id)
         if target.status in ['administrator', 'creator']:
@@ -484,32 +560,87 @@ async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     except:
         pass
     
-    # Удаляем
     user_name = user_to_remove.first_name or user_to_remove.username or str(user_to_remove.id)
     
     try:
         await context.bot.ban_chat_member(chat_id, user_to_remove.id)
         await context.bot.unban_chat_member(chat_id, user_to_remove.id)
         await update.message.reply_text(f"✅ Пользователь <b>{user_name}</b> удалён из группы!", parse_mode=ParseMode.HTML)
-        print(f"✅ Удалён: {user_name} (ID: {user_to_remove.id})")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка удаления: {e}")
-        print(f"❌ Ошибка: {e}")
-        
-async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает список всех команд по запросу #меню"""
+
+# ========== КОМАНДА ДЛЯ УПРАВЛЕНИЯ КНОПКОЙ ПОДЕЛИТЬСЯ ==========
+async def share_toggle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ENABLE_SHARE_BUTTON
     
-    menu_text = """
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ У вас нет прав.")
+        return
+    
+    ENABLE_SHARE_BUTTON = not ENABLE_SHARE_BUTTON
+    
+    status_text = "✅ ВКЛЮЧЕНА" if ENABLE_SHARE_BUTTON else "❌ ВЫКЛЮЧЕНА"
+    status_emoji = "🟢" if ENABLE_SHARE_BUTTON else "🔴"
+    
+    toggle_btn = InlineKeyboardButton(
+        f"{'🔴 Выключить' if ENABLE_SHARE_BUTTON else '🟢 Включить'}", 
+        callback_data="toggle_share"
+    )
+    reply_markup = InlineKeyboardMarkup([[toggle_btn]])
+    
+    await update.message.reply_text(
+        f"{status_emoji} <b>Кнопка \"Поделиться\"</b>\n\n"
+        f"Статус: {status_text}\n\n"
+        f"Когда кнопка включена, под каждым новым постом будет "
+        f"появляться кнопка \"📤 Поделиться\".\n\n"
+        f"Нажмите на кнопку ниже, чтобы изменить статус:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup
+    )
+
+async def toggle_share_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ENABLE_SHARE_BUTTON
+    
+    query = update.callback_query
+    await query.answer()
+    
+    ENABLE_SHARE_BUTTON = not ENABLE_SHARE_BUTTON
+    
+    status_text = "✅ ВКЛЮЧЕНА" if ENABLE_SHARE_BUTTON else "❌ ВЫКЛЮЧЕНА"
+    status_emoji = "🟢" if ENABLE_SHARE_BUTTON else "🔴"
+    
+    toggle_btn = InlineKeyboardButton(
+        f"{'🔴 Выключить' if ENABLE_SHARE_BUTTON else '🟢 Включить'}", 
+        callback_data="toggle_share"
+    )
+    reply_markup = InlineKeyboardMarkup([[toggle_btn]])
+    
+    await query.edit_message_text(
+        f"{status_emoji} <b>Кнопка \"Поделиться\"</b>\n\n"
+        f"Статус: {status_text}\n\n"
+        f"Когда кнопка включена, под каждым новым постом будет "
+        f"появляться кнопка \"📤 Поделиться\".\n\n"
+        f"Нажмите на кнопку ниже, чтобы изменить статус:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup
+    )
+
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    share_status = "✅ Включена" if ENABLE_SHARE_BUTTON else "❌ Выключена"
+    share_emoji = "🟢" if ENABLE_SHARE_BUTTON else "🔴"
+    
+    menu_text = f"""
 📋 <b>ДОСТУПНЫЕ КОМАНДЫ</b>
 
 <b>👤 ОБЩИЕ КОМАНДЫ:</b>
 • /start - приветствие и информация о боте
-• /donate - поддержать проект (статистика донатов)
+• /donate - поддержать проект
 
 <b>👑 АДМИН-КОМАНДЫ (только для админа бота):</b>
 • /post - создать пост для последнего файла
 • /del ID - удалить файл по ID
 • /clear - очистить все файлы
+• /share_toggle - включить/выключить кнопку "Поделиться"
 
 <b>👥 КОМАНДЫ ДЛЯ ГРУПП (админы группы):</b>
 • /addgroup - добавить текущую группу в список разрешённых
@@ -523,12 +654,38 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 2. Напишите #удалить
 3. Отправьте - пользователь будет удалён
 
+<b>📤 КНОПКА "ПОДЕЛИТЬСЯ":</b>
+Статус: {share_emoji} {share_status}
+• /share_toggle - изменить статус
+
 <b>🔗 Полезные ссылки:</b>
-• <a href='{}'>Наш канал</a>
-• <a href='{}'>Поддержать проект</a>
-""".format(CHANNEL_LINK, DONATE_LINK)
+• <a href='{CHANNEL_LINK}'>Наш канал</a>
+• <a href='{DONATE_LINK}'>Поддержать проект</a>
+"""
+    await update.message.reply_text(menu_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+# ========== ФУНКЦИЯ ДЛЯ КНОПКИ ПОДЕЛИТЬСЯ ==========
+async def share_post_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нажатия на кнопку 'Поделиться'"""
+    query = update.callback_query
+    await query.answer()
     
-    await update.message.reply_text(menu_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)        
+    # Получаем ID поста из callback_data
+    post_id = query.data.replace("share_post_", "")
+    
+    # Формируем ссылку на пост
+    channel_name = CHANNEL_USERNAME.replace("@", "")
+    post_link = f"https://t.me/{channel_name}/{post_id}"
+    
+    # Отправляем ссылку для копирования
+    await query.message.reply_text(
+        f"📤 <b>Поделитесь постом!</b>\n\n"
+        f"🔗 Ссылка на пост:\n"
+        f"<code>{post_link}</code>\n\n"
+        f"📱 Скопируйте ссылку и отправьте другу или в чат!",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
 
 # ========== ОБРАБОТЧИК СОБЫТИЙ ==========
 async def handle_channel_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -636,36 +793,8 @@ async def handle_channel_member_update(update: Update, context: ContextTypes.DEF
     except Exception:
         pass
 
-# ========== БАЗА ФАЙЛОВ ==========
-def load_db():
-    if not os.path.exists(FILE_DB):
-        with open(FILE_DB, "w", encoding="utf-8") as f:
-            json.dump({"files": {}, "last_id": 0}, f)
-        return {"files": {}, "last_id": 0}
-    try:
-        with open(FILE_DB, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if "files" not in data:
-                old_files = data
-                max_id = 0
-                for key, value in old_files.items():
-                    if key.isdigit() and int(key) > max_id:
-                        max_id = int(key)
-                data = {"files": old_files, "last_id": max_id}
-                save_db(data)
-            return data
-    except:
-        with open(FILE_DB, "w", encoding="utf-8") as f:
-            json.dump({"files": {}, "last_id": 0}, f)
-        return {"files": {}, "last_id": 0}
-
-def save_db(db):
-    with open(FILE_DB, "w", encoding="utf-8") as f:
-        json.dump(db, f, indent=2, ensure_ascii=False)
-
+# ========== КОМАНДЫ ==========
 async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /donate - показывает кнопку поддержки"""
-    
     text = """
 💰 <b>ПОДДЕРЖАТЬ ПРОЕКТ</b>
 
@@ -674,10 +803,8 @@ async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Любая сумма поможет проекту развиваться!
 """
-    
     donate_btn = InlineKeyboardButton("💰 Поддержать проект", url=DONATE_LINK)
     reply_markup = InlineKeyboardMarkup([[donate_btn]])
-    
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 async def check_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -705,9 +832,8 @@ async def check_subscription_callback(update: Update, context: ContextTypes.DEFA
         data = query.data.split('_')
         if len(data) > 2 and data[2]:
             file_id = data[2]
-            db = load_db()
-            if file_id in db["files"]:
-                entry = db["files"][file_id]
+            entry = get_file_by_id(file_id)
+            if entry:
                 await context.bot.send_document(chat_id=query.from_user.id, document=entry["file_id"], caption=SIGNATURE)
                 await query.edit_message_text("✅ <b>Спасибо за подписку! Файл отправлен.</b>", parse_mode=ParseMode.HTML)
             else:
@@ -726,17 +852,27 @@ async def del_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Используйте: /del ID\nНапример: /del 5")
         return
     file_id = args[0]
-    db = load_db()
-    if file_id not in db["files"]:
+    
+    with open(FILE_DB, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    
+    if file_id not in data.get("files", {}) and file_id not in data.get("file_ids", []):
         await update.message.reply_text("❌ Файл не найден.")
         return
-    file_name = db["files"][file_id]["file_name"]
-    del db["files"][file_id]
-    if db["files"]:
-        db["last_id"] = max(int(id) for id in db["files"].keys())
-    else:
-        db["last_id"] = 0
-    save_db(db)
+    
+    file_name = data["files"].get(file_id, {}).get("file_name", "Unknown")
+    
+    if "files" in data and file_id in data["files"]:
+        del data["files"][file_id]
+    if "file_ids" in data and file_id in data["file_ids"]:
+        data["file_ids"].remove(file_id)
+    
+    save_db(data)
+    
+    with cache_lock:
+        if file_id in file_cache:
+            del file_cache[file_id]
+    
     await update.message.reply_text(f"✅ Файл ID {file_id} ({file_name}) удалён.")
 
 async def clear_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -753,12 +889,10 @@ async def clear_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == 'clear_confirm':
-        db = load_db()
-        if db["files"]:
-            backup_file = f"file_db_backup_{len(db['files'])}_files.json"
-            shutil.copy2(FILE_DB, backup_file)
-        new_db = {"files": {}, "last_id": 0}
+        new_db = {"files": {}, "last_id": 0, "file_ids": []}
         save_db(new_db)
+        with cache_lock:
+            file_cache.clear()
         await query.edit_message_text("✅ Все файлы удалены.")
     else:
         await query.edit_message_text("❌ Очистка отменена.")
@@ -770,16 +904,18 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if message.document and message.document.file_name and message.document.file_name.lower().endswith('.apk'):
         try:
-            db = load_db()
-            next_id = db["last_id"] + 1
+            with open(FILE_DB, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                next_id = data.get("last_id", 0) + 1
             file_id = str(next_id)
-            db["files"][file_id] = {
+            
+            file_data = {
                 "file_id": message.document.file_id,
                 "file_name": message.document.file_name,
                 "uploaded_at": message.date.isoformat() if message.date else ""
             }
-            db["last_id"] = next_id
-            save_db(db)
+            save_file_to_db(file_id, file_data)
+            
             bot_username = (await context.bot.get_me()).username
             botlink = f"https://t.me/{bot_username}?start={file_id}"
             create_btn = InlineKeyboardButton("📝 Создать пост", callback_data=f"create_post_{file_id}")
@@ -797,12 +933,15 @@ async def adm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ У вас нет прав.")
         return ConversationHandler.END
     db = load_db()
-    files = db["files"]
+    files = db.get("files", {})
     if not files:
         await update.message.reply_text("📭 Нет файлов. Сначала отправьте .apk файл.")
         return ConversationHandler.END
     last_file_id = str(db["last_id"])
-    last_file = files[last_file_id]
+    last_file = files.get(last_file_id)
+    if not last_file:
+        await update.message.reply_text("❌ Последний файл не найден.")
+        return ConversationHandler.END
     bot_username = (await context.bot.get_me()).username
     botlink = f"https://t.me/{bot_username}?start={last_file_id}"
     create_btn = InlineKeyboardButton("📝 Создать пост", callback_data=f"create_post_{last_file_id}")
@@ -814,8 +953,8 @@ async def start_create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     file_id = query.data.replace("create_post_", "")
-    db = load_db()
-    if file_id not in db["files"]:
+    entry = get_file_by_id(file_id)
+    if not entry:
         await query.edit_message_text("❌ Файл не найден.")
         return ConversationHandler.END
     bot_username = (await context.bot.get_me()).username
@@ -824,13 +963,13 @@ async def start_create_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "media_type": None,
         "media_path": "",
         "media_id": "",
-        "title": db["files"][file_id]["file_name"],
+        "title": entry["file_name"],
         "description": "",
         "buttons": [],
         "watermark": "on",
         "file_id": file_id
     }
-    await query.edit_message_text(f"🖼 <b>Создание нового поста</b>\n\n📱 <b>Файл:</b> {db['files'][file_id]['file_name']}\n🔗 <b>Ссылка на файл:</b>\n<code>{botlink}</code>\n\nВыберите тип медиа для поста:", parse_mode=ParseMode.HTML, reply_markup=media_type_keyboard())
+    await query.edit_message_text(f"🖼 <b>Создание нового поста</b>\n\n📱 <b>Файл:</b> {entry['file_name']}\n🔗 <b>Ссылка на файл:</b>\n<code>{botlink}</code>\n\nВыберите тип медиа для поста:", parse_mode=ParseMode.HTML, reply_markup=media_type_keyboard())
     return ADD_MEDIA
 
 async def add_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1081,7 +1220,12 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = post.get('title', '')
             watermark_enabled = post.get('watermark') == 'on'
             buttons = post.get('buttons', []).copy()
+            
+            if ENABLE_SHARE_BUTTON:
+                buttons.append({"label": "📤 Поделиться", "callback_data": "share_placeholder"})
+            
             reply_markup = build_buttons(post) if buttons else None
+            
             if post['media_type'] == 'photo' and media_path and os.path.exists(media_path):
                 if watermark_enabled:
                     watermarked_path = add_watermark_to_image(media_path, title)
@@ -1118,7 +1262,22 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await add_random_reaction(CHANNEL_ID, post_id, context)
                 channel_name = CHANNEL_USERNAME.replace("@", "")
                 post_link = f"https://t.me/{channel_name}/{post_id}"
-            await query.edit_message_text(f"✅ <b>Пост опубликован!</b>\n\n🔗 <b>Ссылка на пост:</b>\n<code>{post_link}</code>\n\n📱 <b>Ссылка на файл:</b>\n<code>{botlink}</code>", parse_mode=ParseMode.HTML)
+            
+            if ENABLE_SHARE_BUTTON:
+                final_buttons = []
+                for btn in context.user_data['post'].get('buttons', []):
+                    final_buttons.append(btn)
+                share_url = f"https://t.me/share/url?url={post_link}&text=🔥 Скачай мод!"
+                final_buttons.append({"label": "📤 Поделиться", "url": share_url})
+                final_reply_markup = build_buttons_with_callback({"buttons": final_buttons})
+                await context.bot.edit_message_reply_markup(
+                    chat_id=CHANNEL_ID,
+                    message_id=post_id,
+                    reply_markup=final_reply_markup
+                )
+            
+            share_status_msg = "\n\n📤 Кнопка \"Поделиться\" добавлена!" if ENABLE_SHARE_BUTTON else "\n\n❌ Кнопка \"Поделиться\" отключена"
+            await query.edit_message_text(f"✅ <b>Пост опубликован!</b>\n\n🔗 <b>Ссылка на пост:</b>\n<code>{post_link}</code>\n\n📱 <b>Ссылка на файл:</b>\n<code>{botlink}</code>{share_status_msg}", parse_mode=ParseMode.HTML)
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка: {str(e)[:100]}")
         return ConversationHandler.END
@@ -1129,33 +1288,94 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ADMIN_PANEL
 
 async def add_btn_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сохраняет текст кнопки и предлагает выбрать тип ссылки"""
     label = update.message.text
     context.user_data['btn_tmp_label'] = label
-    file_id = context.user_data['post']['file_id']
-    bot_username = (await context.bot.get_me()).username
-    file_link = f"https://t.me/{bot_username}?start={file_id}"
-    await update.message.reply_text(f"✅ Текст кнопки сохранен: {label}\n\n🔗 <b>Ссылка на файл:</b>\n<code>{file_link}</code>\n\nТеперь введите URL для кнопки:", parse_mode=ParseMode.HTML)
-    return ADD_BTN_URL
+    
+    # Предлагаем выбрать тип ссылки
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📱 Ссылка на файл (APK)", callback_data="btn_type_file")],
+        [InlineKeyboardButton("🌐 Своя ссылка (фильм/сайт)", callback_data="btn_type_custom")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_btn")]
+    ])
+    
+    await update.message.reply_text(
+        f"✅ Текст кнопки: <b>{label}</b>\n\n"
+        f"Выберите тип ссылки:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+    return ADD_BTN_URL  # Переходим в состояние выбора типа
 
-async def add_btn_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def btn_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик выбора типа кнопки"""
+    query = update.callback_query
+    await query.answer()
+    
+    btn_type = query.data.replace("btn_type_", "")
+    label = context.user_data.get('btn_tmp_label', 'Кнопка')
+    
+    if btn_type == "file":
+        # Автоматическая ссылка на файл
+        file_id = context.user_data['post']['file_id']
+        bot_username = (await context.bot.get_me()).username
+        file_link = f"https://t.me/{bot_username}?start={file_id}"
+        
+        context.user_data['post']['buttons'].append({"label": label, "url": file_link})
+        
+        await query.edit_message_text(
+            f"✅ Кнопка <b>{label}</b> добавлена!\n\n"
+            f"📱 Ссылка на файл:\n"
+            f"<code>{file_link}</code>\n\n"
+            f"Можете добавить ещё кнопки или продолжить настройку поста.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_kb()
+        )
+        return ADMIN_PANEL
+    
+    elif btn_type == "custom":
+        # Запрашиваем ручной ввод ссылки
+        file_id = context.user_data['post']['file_id']
+        bot_username = (await context.bot.get_me()).username
+        botlink = f"https://t.me/{bot_username}?start={file_id}"
+        
+        await query.edit_message_text(
+            f"✏️ <b>Введите URL для кнопки</b>\n\n"
+            f"📱 Текст кнопки: {label}\n\n"
+            f"🔗 Примеры ссылок:\n"
+            f"• https://t.me/your_channel\n"
+            f"• https://www.youtube.com/watch?v=...\n"
+            f"• https://kinopoisk.ru/...\n\n"
+            f"Просто отправьте ссылку:",
+            parse_mode=ParseMode.HTML
+        )
+        return ADD_BTN_URL_CUSTOM
+    
+    elif btn_type == "cancel":
+        await query.edit_message_text("❌ Добавление кнопки отменено.")
+        return ADMIN_PANEL
+
+async def add_btn_url_custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сохраняет ручную ссылку и добавляет кнопку"""
     url = update.message.text
-    label = context.user_data.get('btn_tmp_label', '')
-    idx = context.user_data.get('editbtn')
+    label = context.user_data.get('btn_tmp_label', 'Кнопка')
+    
+    context.user_data['post']['buttons'].append({"label": label, "url": url})
+    
     file_id = context.user_data['post']['file_id']
     bot_username = (await context.bot.get_me()).username
     file_link = f"https://t.me/{bot_username}?start={file_id}"
-    if idx is not None:
-        context.user_data['post']['buttons'][idx] = {"label": label, "url": url}
-        context.user_data['editbtn'] = None
-        action_text = "изменена"
-    else:
-        if not label:
-            await update.message.reply_text("❌ Ошибка: не найден текст кнопки.")
-            return ADMIN_PANEL
-        context.user_data['post']['buttons'].append({"label": label, "url": url})
-        action_text = "добавлена"
-    await show_preview(update, context)
-    await update.message.reply_text(f"✅ Кнопка {action_text}!\n\n🔗 <b>Ссылка на файл:</b>\n<code>{file_link}</code>\n\nНастройте пост с помощью клавиатуры:", parse_mode=ParseMode.HTML, reply_markup=admin_kb())
+    
+    await update.message.reply_text(
+        f"✅ Кнопка <b>{label}</b> добавлена!\n\n"
+        f"🔗 Ваша ссылка:\n"
+        f"<code>{url}</code>\n\n"
+        f"📱 Ссылка на файл:\n"
+        f"<code>{file_link}</code>\n\n"
+        f"Можете добавить ещё кнопки или продолжить настройку поста.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_kb()
+    )
     return ADMIN_PANEL
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1167,23 +1387,26 @@ async def filebot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) == 1 and args[0].isdigit():
         user_id = update.effective_user.id
         file_id = args[0]
-        db = load_db()
         if not await check_subscription(user_id, context):
             await subscription_required(update, context, file_id)
             return
-        entry = db["files"].get(file_id)
+        entry = get_file_by_id(file_id)
         if entry:
             signature = generate_file_signature(entry["file_name"])
             caption = f"{signature}\n\n{SIGNATURE}"
             await context.bot.send_document(chat_id=update.effective_chat.id, document=entry["file_id"], caption=caption, parse_mode=ParseMode.HTML)
         else:
-            await update.message.reply_text("Файл не найден.")
+            await update.message.reply_text("❌ Файл не найден.")
     else:
         user = update.effective_user
         username = user.username if user.username else user.first_name
-        db = load_db()
-        files = db["files"]
-        response = f"👋 {username}!\n📊 Файлов: {len(files)}\n🔢 Последний ID: {db['last_id']}\n\n📋 <b>Команды:</b>\n/post - создать пост для последнего файла\n/donate - поддержать проект\n/del ID - удалить файл\n/clear - очистить все файлы"
+        files_count = get_files_count()
+        with open(FILE_DB, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            last_id = data.get("last_id", 0)
+        
+        share_status = "✅ Включена" if ENABLE_SHARE_BUTTON else "❌ Выключена"
+        response = f"👋 {username}!\n📊 Файлов: {files_count}\n🔢 Последний ID: {last_id}\n📤 Кнопка поделиться: {share_status}\n\n📋 <b>Команды:</b>\n/post - создать пост для последнего файла\n/donate - поддержать проект\n/del ID - удалить файл\n/clear - очистить все файлы\n/share_toggle - вкл/выкл кнопку поделиться"
         await update.message.reply_text(response, parse_mode=ParseMode.HTML)
 
 def render_post(post):
@@ -1201,9 +1424,31 @@ def build_buttons(post):
         return None
     rows = []
     for i in range(0, len(buttons), 2):
-        row = [InlineKeyboardButton(btn["label"], url=btn["url"]) for btn in buttons[i:i+2]]
-        rows.append(row)
-    return InlineKeyboardMarkup(rows)
+        row = []
+        for btn in buttons[i:i+2]:
+            if "url" in btn:
+                row.append(InlineKeyboardButton(btn["label"], url=btn["url"]))
+            elif "callback_data" in btn:
+                row.append(InlineKeyboardButton(btn["label"], callback_data=btn["callback_data"]))
+        if row:
+            rows.append(row)
+    return InlineKeyboardMarkup(rows) if rows else None
+
+def build_buttons_with_callback(post):
+    buttons = post.get("buttons", [])
+    if not buttons:
+        return None
+    rows = []
+    for i in range(0, len(buttons), 2):
+        row = []
+        for btn in buttons[i:i+2]:
+            if "url" in btn:
+                row.append(InlineKeyboardButton(btn["label"], url=btn["url"]))
+            elif "callback_data" in btn:
+                row.append(InlineKeyboardButton(btn["label"], callback_data=btn["callback_data"]))
+        if row:
+            rows.append(row)
+    return InlineKeyboardMarkup(rows) if rows else None
 
 async def show_preview(update, context):
     post = context.user_data['post']
@@ -1368,6 +1613,12 @@ def add_watermark_to_image(image_path, title=""):
         return image_path
 
 # =========== MAIN ==========
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"⚠️ Ошибка: {context.error}")
+    if "TimedOut" in str(context.error) or "NetworkError" in str(context.error):
+        print("⚠️ Проблема с сетью, продолжаем работу...")
+        return
+
 def main():
     print("=" * 50)
     print("💎 ЗАПУСК БОТА")
@@ -1375,6 +1626,7 @@ def main():
     print(f"👑 Админ ID: {ADMIN_ID}")
     print(f"📢 Канал: {CHANNEL_USERNAME}")
     print(f"💰 Ссылка для донатов: {DONATE_LINK}")
+    print(f"📤 Кнопка 'Поделиться': {'✅ ВКЛЮЧЕНА' if ENABLE_SHARE_BUTTON else '❌ ВЫКЛЮЧЕНА'}")
     print("=" * 50)
     
     create_default_avatar()
@@ -1390,53 +1642,57 @@ def main():
         print("❌ Установите PIL: pip install Pillow")
         return
     
-    db = load_db()
-    print(f"📊 Файлов в базе: {len(db['files'])}")
-    print(f"🔢 Последний ID: {db['last_id']}")
+    files_count = get_files_count()
+    print(f"📊 Файлов в базе: {files_count}")
     
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
+    app.add_error_handler(error_handler)
+    
     conv = ConversationHandler(
-        entry_points=[
-            CommandHandler('post', adm_cmd),
-            CallbackQueryHandler(start_create_post, pattern='^create_post_')
+    entry_points=[
+        CommandHandler('post', adm_cmd),
+        CallbackQueryHandler(start_create_post, pattern='^create_post_')
+    ],
+    states={
+        ADD_MEDIA: [
+            CallbackQueryHandler(add_media),
+            MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION, add_media),
         ],
-        states={
-            ADD_MEDIA: [
-                CallbackQueryHandler(add_media),
-                MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION, add_media),
-            ],
-            ADD_DESC: [
-                CallbackQueryHandler(add_desc),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_desc),
-            ],
-            ADMIN_PANEL: [
-                CallbackQueryHandler(admin_panel),
-            ],
-            ADD_WATERMARK: [
-                CallbackQueryHandler(admin_panel),
-            ],
-            ADD_BTN_LABEL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_btn_label),
-            ],
-            ADD_BTN_URL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_btn_url),
-            ],
-            EDIT_TITLE: [
-                CallbackQueryHandler(edit_title_handler),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_title_handler),
-            ],
-            EDIT_DESC: [
-                CallbackQueryHandler(edit_description_handler),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_description_handler),
-            ],
-            EDIT_BUTTONS: [
-                CallbackQueryHandler(admin_panel),
-            ],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-        allow_reentry=True
-    )
+        ADD_DESC: [
+            CallbackQueryHandler(add_desc),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, add_desc),
+        ],
+        ADMIN_PANEL: [
+            CallbackQueryHandler(admin_panel),
+        ],
+        ADD_WATERMARK: [
+            CallbackQueryHandler(admin_panel),
+        ],
+        ADD_BTN_LABEL: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, add_btn_label),
+        ],
+        ADD_BTN_URL: [  # Для выбора типа ссылки
+            CallbackQueryHandler(btn_type_callback, pattern='^btn_type_'),
+        ],
+        ADD_BTN_URL_CUSTOM: [  # Для ручного ввода ссылки
+            MessageHandler(filters.TEXT & ~filters.COMMAND, add_btn_url_custom),
+        ],
+        EDIT_TITLE: [
+            CallbackQueryHandler(edit_title_handler),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, edit_title_handler),
+        ],
+        EDIT_DESC: [
+            CallbackQueryHandler(edit_description_handler),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, edit_description_handler),
+        ],
+        EDIT_BUTTONS: [
+            CallbackQueryHandler(admin_panel),
+        ],
+    },
+    fallbacks=[CommandHandler('cancel', cancel)],
+    allow_reentry=True
+)
     
     app.add_handler(CommandHandler('start', filebot_start))
     app.add_handler(CommandHandler('donate', donate_command))
@@ -1445,23 +1701,29 @@ def main():
     app.add_handler(CommandHandler('addgroup', add_group))
     app.add_handler(CommandHandler('removegroup', remove_group))
     app.add_handler(CommandHandler('listgroups', list_groups))
+    app.add_handler(CommandHandler('share_toggle', share_toggle_command))
     app.add_handler(CallbackQueryHandler(clear_callback, pattern='^clear_'))
     app.add_handler(CallbackQueryHandler(check_subscription_callback, pattern='^check_sub'))
+    app.add_handler(CallbackQueryHandler(toggle_share_callback, pattern='^toggle_share'))
+    app.add_handler(CallbackQueryHandler(share_post_callback, pattern='^share_post_'))
     app.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_apk))
     app.add_handler(conv)
     app.add_handler(ChatMemberHandler(handle_channel_member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(show_more_callback, pattern='^show_more_'))
-    
-    # Обработчик для команды #удалить (как текст, не как команда)
     app.add_handler(MessageHandler(filters.Regex(r'^#удалить'), remove_user_command))
     app.add_handler(MessageHandler(filters.Regex(r'^#меню'), menu_command))
     
     print("✅ БОТ ЗАПУЩЕН!")
     print("=" * 50)
     print("💡 Напишите #меню в группе или личке, чтобы увидеть список команд")
+    print("📤 Управление кнопкой 'Поделиться': /share_toggle")
     print("=" * 50)
     
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        print(f"❌ Критическая ошибка: {e}")
+        print("⚠️ Бот упал, но вы можете перезапустить его командой python bot.py")
 
 if __name__ == "__main__":
     try:
@@ -1470,4 +1732,4 @@ if __name__ == "__main__":
         print("\n\n🛑 Бот остановлен")
     except Exception as e:
         print(f"\n\n❌ Ошибка: {e}")
-
+        print("🔄 Перезапустите бота: python bot.py")
